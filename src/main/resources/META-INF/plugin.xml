@@ -8,96 +8,96 @@
     config generation, migration help, a pipeline preview tool window, Jenkins sign-in with
     live read-only project data, and upstream schema checks.
   ]]></description>
+    <resource-bundle>messages.MerebJenkinsBundle</resource-bundle>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.json</depends>
     <depends>org.jetbrains.plugins.yaml</depends>
 
     <extensions defaultExtensionNs="JavaScript.JsonSchema">
-        <ProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
+        <ProviderFactory implementation="org.mereb.jenkins.mjc.MerebJenkinsSchemaProviderFactory"/>
     </extensions>
 
     <extensions defaultExtensionNs="com.intellij">
-        <notificationGroup id="Mereb Jenkins" displayType="BALLOON" isLogByDefault="true"/>
-        <postStartupActivity implementation="org.mereb.intellij.mjc.MerebJenkinsOnboardingActivity"/>
+        <notificationGroup
+                id="Mereb Jenkins"
+                key="notification.group.mereb.jenkins"
+                displayType="BALLOON"
+                isLogByDefault="true"/>
+        <postStartupActivity implementation="org.mereb.jenkins.mjc.MerebJenkinsOnboardingActivity"/>
         <applicationConfigurable
                 parentId="tools"
-                instance="org.mereb.intellij.mjc.MerebJenkinsSettingsConfigurable"
+                instance="org.mereb.jenkins.mjc.MerebJenkinsSettingsConfigurable"
                 id="org.mereb.jenkins.helper.settings"
-                displayName="Mereb Jenkins Helper"/>
+                key="settings.mereb.jenkins.helper.display.name"
+                bundle="messages.MerebJenkinsBundle"/>
         <fileType
                 name="Mereb Jenkins Configuration"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigurationFileType"
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsConfigurationFileType"
                 fieldName="INSTANCE"
                 language="yaml"
                 extensions="mjc"/>
         <lang.inspectionSuppressor
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsInspectionSuppressor"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsInspectionSuppressor"/>
         <lang.syntaxHighlighterFactory
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsSyntaxHighlighterFactory"/>
-        <colorSettingsPage implementation="org.mereb.intellij.mjc.MerebJenkinsColorSettingsPage"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsSyntaxHighlighterFactory"/>
+        <colorSettingsPage implementation="org.mereb.jenkins.mjc.MerebJenkinsColorSettingsPage"/>
         <completion.contributor
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsCompletionContributor"/>
-        <typedHandler implementation="org.mereb.intellij.mjc.MerebJenkinsCompletionTypedHandler"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsCompletionContributor"/>
+        <typedHandler implementation="org.mereb.jenkins.mjc.MerebJenkinsCompletionTypedHandler"/>
         <lang.documentationProvider
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsDocumentationProvider"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsDocumentationProvider"/>
         <codeInsight.inlayProvider
                 language="yaml"
                 id="MerebJenkinsBlockMetadata"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsBlockInlayHintsProvider"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsBlockInlayHintsProvider"/>
         <toolWindow id="Mereb Jenkins"
                     anchor="right"
                     icon="/icons/mereb-toolwindow.svg"
-                    factoryClass="org.mereb.intellij.mjc.MerebJenkinsToolWindowFactory"
+                    factoryClass="org.mereb.jenkins.mjc.MerebJenkinsToolWindowFactory"
                     canCloseContents="false"/>
         <annotator
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsRelationAnnotator"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsRelationAnnotator"/>
         <annotator
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsScalarAnnotator"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsScalarAnnotator"/>
         <codeInsight.lineMarkerProvider
                 language="yaml"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsLineMarkerProvider"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsLineMarkerProvider"/>
         <localInspection
                 language="yaml"
                 shortName="LegacyMerebJenkinsConfigFilename"
-                displayName="Legacy Mereb Jenkins config filename"
-                groupName="Mereb Jenkins"
+                key="inspection.legacy.filename.display.name"
+                groupKey="inspection.group.name"
                 enabledByDefault="true"
                 level="WEAK WARNING"
-                implementationClass="org.mereb.intellij.mjc.LegacyMerebJenkinsConfigInspection"/>
+                implementationClass="org.mereb.jenkins.mjc.LegacyMerebJenkinsConfigInspection"/>
         <localInspection
                 language="yaml"
                 shortName="MerebJenkinsConfigSemantics"
-                displayName="Mereb Jenkins config semantics"
-                groupName="Mereb Jenkins"
+                key="inspection.config.semantics.display.name"
+                groupKey="inspection.group.name"
                 enabledByDefault="true"
                 level="WARNING"
-                implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigSemanticInspection"/>
+                implementationClass="org.mereb.jenkins.mjc.MerebJenkinsConfigSemanticInspection"/>
     </extensions>
 
     <actions>
         <action id="org.mereb.jenkins.helper.NewConfig"
-                class="org.mereb.intellij.mjc.MerebJenkinsNewConfigAction"
-                text="New Mereb Jenkins Config"
-                description="Create a recipe-aware Mereb Jenkins config">
+                class="org.mereb.jenkins.mjc.MerebJenkinsNewConfigAction">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
         <action id="org.mereb.jenkins.helper.MigrateConfig"
-                class="org.mereb.intellij.mjc.MerebJenkinsMigrationAssistantAction"
-                text="Migrate Mereb Jenkins Config"
-                description="Preview and apply a conservative migration to .ci/ci.mjc">
+                class="org.mereb.jenkins.mjc.MerebJenkinsMigrationAssistantAction">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
         <action id="org.mereb.jenkins.helper.HowTo"
-                class="org.mereb.intellij.mjc.MerebJenkinsHowToAction"
-                text="How To Use Mereb Jenkins Helper"
-                description="Show the built-in guide for the Mereb Jenkins plugin">
+                class="org.mereb.jenkins.mjc.MerebJenkinsHowToAction">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
             <add-to-group group-id="HelpMenu" anchor="last"/>
         </action>

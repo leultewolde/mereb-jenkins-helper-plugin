@@ -13,8 +13,8 @@ plugins {
     id("org.jetbrains.intellij.platform") version "2.13.1"
 }
 
-group = "org.mereb.intellij"
-version = "0.2.3"
+group = "org.mereb.jenkins"
+version = "0.2.4"
 
 val pluginSinceBuild = "242"
 val pluginUntilBuild = "261.*"
