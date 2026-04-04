@@ -70,6 +70,9 @@ class MerebJenkinsConfigPluginTest {
         assertTrue(result.findings.any { it.path?.toString() == "deploy.dev.when" })
         assertTrue(result.summary.ignoredFields.any { it.contains("deploy.dev.when") })
         assertTrue(result.summary.releaseEnabled)
+        assertTrue(result.summary.capabilities.any { it.id == "deploy" && it.enabled })
+        assertTrue(result.summary.relations.any { it.group == "Deploy" && it.status == MerebJenkinsRelationStatus.MISSING })
+        assertTrue(result.summary.sections.any { it.id == "deploy" && it.status == MerebJenkinsRelationStatus.OK })
     }
 
     @Test
@@ -148,5 +151,41 @@ class MerebJenkinsConfigPluginTest {
         assertTrue("service recipe" in labels)
         assertTrue("image block" in labels)
         assertTrue("release autoTag" in labels)
+    }
+
+    @Test
+    fun `completion model suggests known values and env references`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            rawText = """
+                version: 1
+                recipe: service
+                delivery:
+                  mode: staged
+                deploy:
+                  order:
+                    - d
+                  dev:
+                    namespace: apps-dev
+                  prd:
+                    namespace: apps-prd
+            """.trimIndent(),
+            pathString = "deploy.order[0]",
+            linePrefix = "  - d"
+        )
+
+        assertTrue(suggestions.any { it.lookup == "dev" && it.typeText == "deploy env" })
+        assertTrue(suggestions.any { it.lookup == "prd" && it.typeText == "deploy env" })
+    }
+
+    @Test
+    fun `completion model suggests recipe values`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            rawText = "version: 1\nrecipe: s",
+            pathString = "recipe",
+            linePrefix = "recipe: s"
+        )
+
+        assertTrue(suggestions.any { it.lookup == "service" && it.typeText == "recipe" })
+        assertTrue(suggestions.any { it.lookup == "terraform" && it.typeText == "recipe" })
     }
 }

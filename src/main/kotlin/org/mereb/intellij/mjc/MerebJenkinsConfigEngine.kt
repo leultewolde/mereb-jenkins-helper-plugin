@@ -431,6 +431,22 @@ class MerebJenkinsConfigEngine {
         val deployOrder = deployOrder(cfg)
         val microfrontendOrder = microfrontendOrder(cfg)
         val terraformOrder = terraformOrder(cfg)
+        val relations = buildRelations(cfg, resolvedRecipe, deployOrder, microfrontendOrder, terraformOrder) +
+            findingsToRelations(findings)
+        val referencedButMissing = relations.filter { it.status == MerebJenkinsRelationStatus.MISSING }.map { it.label }
+        val definedButUnused = relations.filter { it.status == MerebJenkinsRelationStatus.UNUSED }.map { it.label }
+        val safeFixes = findings
+            .flatMap { it.quickFixes }
+            .filter { it.kind in setOf(
+                MerebJenkinsFixKind.ADD_RECIPE,
+                MerebJenkinsFixKind.REPLACE_RECIPE,
+                MerebJenkinsFixKind.RENAME_CONFIG_FILE,
+                MerebJenkinsFixKind.UPDATE_JENKINSFILE_CONFIG_PATH,
+                MerebJenkinsFixKind.REMOVE_KEY,
+                MerebJenkinsFixKind.FIX_ORDER,
+                MerebJenkinsFixKind.ADD_IMAGE_REPOSITORY,
+            ) }
+            .distinctBy { listOf(it.kind, it.label, it.data) }
         return MerebJenkinsPipelineSummary(
             explicitRecipe = explicitRecipe,
             resolvedRecipe = resolvedRecipe,
@@ -441,7 +457,15 @@ class MerebJenkinsConfigEngine {
             terraformOrder = terraformOrder,
             ignoredFields = findings.filter { it.id.startsWith("ignored-") }.map { it.message },
             repoWarnings = findings.filter { it.id.startsWith("jenkinsfile-") || it.id == "recipe-expected-mismatch" }.map { it.message },
+            referencedButMissing = referencedButMissing,
+            definedButUnused = definedButUnused,
+            capabilities = buildCapabilities(cfg, resolvedRecipe),
+            sections = buildSectionStates(cfg, resolvedRecipe),
+            relations = relations,
+            safeFixes = safeFixes,
             flowSteps = buildFlowSteps(resolvedRecipe, deployOrder, microfrontendOrder, terraformOrder, hasReleaseAutomation(cfg)),
+            errorCount = findings.count { it.severity == MerebJenkinsSeverity.ERROR },
+            warningCount = findings.count { it.severity == MerebJenkinsSeverity.WARNING },
         )
     }
 
@@ -451,20 +475,239 @@ class MerebJenkinsConfigEngine {
         microfrontendOrder: List<String>,
         terraformOrder: List<String>,
         releaseEnabled: Boolean,
-    ): List<String> {
-        val steps = mutableListOf("Build")
+    ): List<MerebJenkinsFlowStep> {
+        val steps = mutableListOf(MerebJenkinsFlowStep("Build", MerebJenkinsPath.root().key("build")))
         when (recipe) {
             "service" -> {
-                steps += "Build Image"
-                steps += deployOrder.ifEmpty { listOf("Deploy") }.map { "Deploy $it" }
+                steps += MerebJenkinsFlowStep("Build Image", MerebJenkinsPath.root().key("image"))
+                steps += deployOrder.ifEmpty { listOf("Deploy") }.map {
+                    MerebJenkinsFlowStep("Deploy $it", MerebJenkinsPath.root().key("deploy").key(it))
+                }
             }
-            "image" -> steps += "Build Image"
-            "microfrontend" -> steps += microfrontendOrder.ifEmpty { listOf("Publish") }.map { "Publish $it" }
-            "terraform" -> steps += terraformOrder.ifEmpty { listOf("Terraform") }.map { "Terraform $it" }
-            "package" -> steps += "Release Stages"
+            "image" -> steps += MerebJenkinsFlowStep("Build Image", MerebJenkinsPath.root().key("image"))
+            "microfrontend" -> steps += microfrontendOrder.ifEmpty { listOf("Publish") }.map {
+                MerebJenkinsFlowStep("Publish $it", MerebJenkinsPath.root().key("microfrontend").key("environments").key(it))
+            }
+            "terraform" -> steps += terraformOrder.ifEmpty { listOf("Terraform") }.map {
+                MerebJenkinsFlowStep("Terraform $it", MerebJenkinsPath.root().key("terraform").key("environments").key(it))
+            }
+            "package" -> steps += MerebJenkinsFlowStep("Release Stages", MerebJenkinsPath.root().key("releaseStages"))
         }
-        if (releaseEnabled) steps += "Release"
+        if (releaseEnabled) steps += MerebJenkinsFlowStep("Release", MerebJenkinsPath.root().key("release"))
         return steps
+    }
+
+    private fun buildCapabilities(cfg: Map<String, Any?>, recipe: String): List<MerebJenkinsCapability> {
+        val deployEnvCount = deployEnvironmentNames(cfg).size
+        val microfrontendEnvCount = microfrontendEnvironmentNames(cfg).size
+        val terraformEnvCount = terraformEnvironmentNames(cfg).size
+        return listOf(
+            MerebJenkinsCapability("recipe", recipe, true, if (cfg["recipe"] == null) "Inferred from config shape" else "Explicitly configured"),
+            MerebJenkinsCapability("image", "Image", isImageEnabled(cfg), if (isImageEnabled(cfg)) imageRepositoryLabel(cfg) else "Disabled"),
+            MerebJenkinsCapability("release", "Release", hasReleaseAutomation(cfg), if (hasReleaseAutomation(cfg)) "Tagging or release stages configured" else "No release automation"),
+            MerebJenkinsCapability("deploy", "Deploy", deployEnvCount > 0, if (deployEnvCount > 0) "$deployEnvCount environment(s)" else "No deploy environments"),
+            MerebJenkinsCapability("microfrontend", "Microfrontend", microfrontendEnvCount > 0, if (microfrontendEnvCount > 0) "$microfrontendEnvCount environment(s)" else "No microfrontend environments"),
+            MerebJenkinsCapability("terraform", "Terraform", terraformEnvCount > 0, if (terraformEnvCount > 0) "$terraformEnvCount environment(s)" else "No terraform environments"),
+        )
+    }
+
+    private fun buildSectionStates(cfg: Map<String, Any?>, recipe: String): List<MerebJenkinsSectionState> {
+        val activeSections = activeSectionsForRecipe(recipe)
+        val requiredSections = requiredSectionsForRecipe(recipe)
+        val sectionDefs = listOf(
+            Triple("build", "Build", sectionDefined(cfg, "build", isActive = true)),
+            Triple("image", "Image", sectionDefined(cfg, "image", isImageEnabled(cfg))),
+            Triple("deploy", "Deploy", hasDeployEnvironments(cfg)),
+            Triple("microfrontend", "Microfrontend", hasMicrofrontendEnvironments(cfg)),
+            Triple("terraform", "Terraform", hasTerraformEnvironments(cfg)),
+            Triple("release", "Release", hasReleaseAutomation(cfg)),
+        )
+
+        return sectionDefs.map { (id, label, defined) ->
+            val status = when {
+                id in requiredSections && !defined -> MerebJenkinsRelationStatus.MISSING
+                defined && id !in activeSections -> MerebJenkinsRelationStatus.INACTIVE
+                defined -> MerebJenkinsRelationStatus.OK
+                else -> MerebJenkinsRelationStatus.INACTIVE
+            }
+            val detail = when {
+                id in requiredSections && !defined -> "Required by recipe=$recipe"
+                defined && id !in activeSections -> "Defined, but not active for recipe=$recipe"
+                defined -> "Active for recipe=$recipe"
+                id in activeSections -> "Optional for recipe=$recipe"
+                else -> "Not used for recipe=$recipe"
+            }
+            MerebJenkinsSectionState(
+                id = id,
+                label = label,
+                path = if (id == "release") MerebJenkinsPath.root().key("release") else MerebJenkinsPath.root().key(id),
+                status = status,
+                detail = detail,
+            )
+        }
+    }
+
+    private fun buildRelations(
+        cfg: Map<String, Any?>,
+        recipe: String,
+        deployOrder: List<String>,
+        microfrontendOrder: List<String>,
+        terraformOrder: List<String>,
+    ): List<MerebJenkinsRelation> {
+        val relations = mutableListOf<MerebJenkinsRelation>()
+        val recipePath = MerebJenkinsPath.root().key("recipe")
+        val activeSections = activeSectionsForRecipe(recipe)
+        val requiredSections = requiredSectionsForRecipe(recipe)
+
+        buildSectionStates(cfg, recipe).forEach { section ->
+            val label = "recipe=$recipe -> ${section.label}"
+            val status = when {
+                section.id in requiredSections && section.status == MerebJenkinsRelationStatus.MISSING -> MerebJenkinsRelationStatus.MISSING
+                section.id !in activeSections && section.status == MerebJenkinsRelationStatus.OK -> MerebJenkinsRelationStatus.INACTIVE
+                section.id !in activeSections -> MerebJenkinsRelationStatus.INACTIVE
+                section.status == MerebJenkinsRelationStatus.OK -> MerebJenkinsRelationStatus.OK
+                else -> section.status
+            }
+            relations += MerebJenkinsRelation(
+                id = "recipe-${section.id}",
+                group = "Recipe",
+                label = label,
+                sourcePath = recipePath,
+                targetPath = section.path,
+                status = status,
+                detail = section.detail,
+            )
+        }
+
+        relations += buildOrderRelations(
+            group = "Deploy",
+            labelPrefix = "deploy.order",
+            order = deployOrder,
+            knownNames = deployEnvironmentNames(cfg),
+            orderRoot = MerebJenkinsPath.root().key("deploy").key("order"),
+            targetRoot = MerebJenkinsPath.root().key("deploy"),
+        )
+        relations += buildOrderRelations(
+            group = "Microfrontend",
+            labelPrefix = "microfrontend.order",
+            order = microfrontendOrder,
+            knownNames = microfrontendEnvironmentNames(cfg),
+            orderRoot = MerebJenkinsPath.root().key("microfrontend").key("order"),
+            targetRoot = MerebJenkinsPath.root().key("microfrontend").key("environments"),
+        )
+        relations += buildOrderRelations(
+            group = "Terraform",
+            labelPrefix = "terraform.order",
+            order = terraformOrder,
+            knownNames = terraformEnvironmentNames(cfg),
+            orderRoot = MerebJenkinsPath.root().key("terraform").key("order"),
+            targetRoot = MerebJenkinsPath.root().key("terraform").key("environments"),
+        )
+
+        return relations.distinctBy { listOf(it.id, it.label, it.group, it.sourcePath?.toString(), it.targetPath?.toString()) }
+    }
+
+    private fun buildOrderRelations(
+        group: String,
+        labelPrefix: String,
+        order: List<String>,
+        knownNames: List<String>,
+        orderRoot: MerebJenkinsPath,
+        targetRoot: MerebJenkinsPath,
+    ): List<MerebJenkinsRelation> {
+        val relations = mutableListOf<MerebJenkinsRelation>()
+        order.forEachIndexed { index, name ->
+            val exists = name in knownNames
+            relations += MerebJenkinsRelation(
+                id = "$labelPrefix-$name-$index",
+                group = group,
+                label = "$labelPrefix[$index] -> $name",
+                sourcePath = orderRoot.index(index),
+                targetPath = if (exists) targetRoot.key(name) else null,
+                status = if (exists) MerebJenkinsRelationStatus.OK else MerebJenkinsRelationStatus.MISSING,
+                detail = if (exists) "Matches ${targetRoot.key(name)}" else "Referenced but missing target: $name",
+            )
+        }
+        if (order.isNotEmpty()) {
+            knownNames.filterNot { it in order }.forEach { name ->
+                relations += MerebJenkinsRelation(
+                    id = "$labelPrefix-unused-$name",
+                    group = group,
+                    label = "$name defined but not referenced by $labelPrefix",
+                    sourcePath = targetRoot.key(name),
+                    targetPath = orderRoot,
+                    status = MerebJenkinsRelationStatus.UNUSED,
+                    detail = "Defined but unused",
+                )
+            }
+        }
+        return relations
+    }
+
+    private fun findingsToRelations(findings: List<MerebJenkinsFinding>): List<MerebJenkinsRelation> {
+        return findings.filter { it.id.startsWith("ignored-") }.map {
+            MerebJenkinsRelation(
+                id = "finding-${it.id}",
+                group = "Runtime",
+                label = it.message,
+                sourcePath = it.path,
+                status = MerebJenkinsRelationStatus.IGNORED,
+                detail = "Ignored by runtime behavior",
+            )
+        }
+    }
+
+    private fun activeSectionsForRecipe(recipe: String): Set<String> = when (recipe) {
+        "build" -> setOf("build")
+        "package" -> setOf("build", "release")
+        "image" -> setOf("build", "image", "release")
+        "service" -> setOf("build", "image", "deploy", "release")
+        "microfrontend" -> setOf("build", "microfrontend", "release")
+        "terraform" -> setOf("build", "terraform", "release")
+        else -> setOf("build")
+    }
+
+    private fun requiredSectionsForRecipe(recipe: String): Set<String> = when (recipe) {
+        "package" -> setOf("release")
+        "image" -> setOf("image")
+        "service" -> setOf("image", "deploy")
+        "microfrontend" -> setOf("microfrontend")
+        "terraform" -> setOf("terraform")
+        else -> emptySet()
+    }
+
+    private fun sectionDefined(cfg: Map<String, Any?>, section: String, isActive: Boolean = false): Boolean = when (section) {
+        "build" -> cfg["build"] != null || cfg["preset"] != null || cfg["pnpm"] != null
+        "image" -> cfg["image"] != null && isActive
+        "release" -> hasReleaseAutomation(cfg)
+        else -> cfg[section] != null || isActive
+    }
+
+    private fun deployEnvironmentNames(cfg: Map<String, Any?>): List<String> {
+        val deploy = when (val direct = cfg["deploy"]) {
+            is Map<*, *> -> direct.normalizeMap()
+            else -> when (val legacy = cfg["environments"]) {
+                is Map<*, *> -> legacy.normalizeMap()
+                else -> emptyMap()
+            }
+        }
+        return deploy.keys.filter { it != "order" }
+    }
+
+    private fun microfrontendEnvironmentNames(cfg: Map<String, Any?>): List<String> {
+        val microfrontend = (cfg["microfrontend"] as? Map<*, *>)?.normalizeMap().orEmpty()
+        return ((microfrontend["environments"] as? Map<*, *>)?.normalizeMap().orEmpty()).keys.toList()
+    }
+
+    private fun terraformEnvironmentNames(cfg: Map<String, Any?>): List<String> {
+        val terraform = (cfg["terraform"] as? Map<*, *>)?.normalizeMap().orEmpty()
+        return ((terraform["environments"] as? Map<*, *>)?.normalizeMap().orEmpty()).keys.toList()
+    }
+
+    private fun imageRepositoryLabel(cfg: Map<String, Any?>): String {
+        val image = (cfg["image"] as? Map<*, *>)?.normalizeMap().orEmpty()
+        return image["repository"]?.asString()?.takeIf(String::isNotBlank)
+            ?: "Enabled"
     }
 
     private fun resolveRecipe(cfg: Map<String, Any?>, explicitRecipe: String?): String {

@@ -28,8 +28,12 @@
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsDocumentationProvider"/>
         <toolWindow id="Mereb Jenkins"
                     anchor="right"
+                    icon="/icons/mereb-toolwindow.svg"
                     factoryClass="org.mereb.intellij.mjc.MerebJenkinsToolWindowFactory"
                     canCloseContents="false"/>
+        <annotator
+                language="YAML"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsRelationAnnotator"/>
         <localInspection
                 language="YAML"
                 shortName="LegacyMerebJenkinsConfigFilename"

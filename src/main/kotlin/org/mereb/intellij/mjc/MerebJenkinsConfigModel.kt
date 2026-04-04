@@ -15,6 +15,14 @@ enum class MerebJenkinsFixKind {
     ADD_IMAGE_REPOSITORY,
 }
 
+enum class MerebJenkinsRelationStatus {
+    OK,
+    MISSING,
+    UNUSED,
+    IGNORED,
+    INACTIVE,
+}
+
 sealed interface MerebJenkinsPathSegment {
     data class Key(val name: String) : MerebJenkinsPathSegment
     data class Index(val index: Int) : MerebJenkinsPathSegment
@@ -70,6 +78,38 @@ data class MerebJenkinsProjectScan(
     val expectedRecipe: String? = null,
 )
 
+data class MerebJenkinsCapability(
+    val id: String,
+    val label: String,
+    val enabled: Boolean,
+    val detail: String? = null,
+)
+
+data class MerebJenkinsSectionState(
+    val id: String,
+    val label: String,
+    val path: MerebJenkinsPath? = null,
+    val status: MerebJenkinsRelationStatus = MerebJenkinsRelationStatus.OK,
+    val detail: String? = null,
+)
+
+data class MerebJenkinsRelation(
+    val id: String,
+    val group: String,
+    val label: String,
+    val sourcePath: MerebJenkinsPath? = null,
+    val targetPath: MerebJenkinsPath? = null,
+    val status: MerebJenkinsRelationStatus = MerebJenkinsRelationStatus.OK,
+    val detail: String? = null,
+)
+
+data class MerebJenkinsFlowStep(
+    val label: String,
+    val path: MerebJenkinsPath? = null,
+    val status: MerebJenkinsRelationStatus = MerebJenkinsRelationStatus.OK,
+    val detail: String? = null,
+)
+
 data class MerebJenkinsPipelineSummary(
     val explicitRecipe: String? = null,
     val resolvedRecipe: String = "build",
@@ -80,7 +120,15 @@ data class MerebJenkinsPipelineSummary(
     val terraformOrder: List<String> = emptyList(),
     val ignoredFields: List<String> = emptyList(),
     val repoWarnings: List<String> = emptyList(),
-    val flowSteps: List<String> = emptyList(),
+    val referencedButMissing: List<String> = emptyList(),
+    val definedButUnused: List<String> = emptyList(),
+    val capabilities: List<MerebJenkinsCapability> = emptyList(),
+    val sections: List<MerebJenkinsSectionState> = emptyList(),
+    val relations: List<MerebJenkinsRelation> = emptyList(),
+    val safeFixes: List<MerebJenkinsFixSuggestion> = emptyList(),
+    val flowSteps: List<MerebJenkinsFlowStep> = emptyList(),
+    val errorCount: Int = 0,
+    val warningCount: Int = 0,
 )
 
 data class MerebJenkinsAnalysisResult(

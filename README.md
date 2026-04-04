@@ -11,12 +11,16 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 - Turns common findings into one-click fixes, including adding `recipe`, renaming legacy files to `.ci/ci.mjc`, updating `Jenkinsfile` `configPath`, removing ignored staged-mode keys, trimming invalid environment order values, and inserting an `image.repository` placeholder.
 - Adds a `New Mereb Jenkins Config` action that creates recipe-aware starter configs for `build`, `package`, `image`, `service`, `microfrontend`, and `terraform`.
 - Adds a conservative migration assistant that previews project-local changes before renaming configs or touching the sibling `Jenkinsfile`.
+- Adds context-aware completions for known values such as `recipe`, `delivery.mode`, `release.autoTag.bump`, and environment references inside order lists.
 - Adds snippet completions for common blocks such as service starters, image blocks, deploy environments, microfrontend environments, and `release.autoTag`.
 - Adds inline documentation for important keys like `recipe`, `delivery.mode`, `release.autoTag.bump`, `deploy.*`, `microfrontend.*`, and `terraform.*`.
+- Adds relation-aware editor coloring for linked order entries, unused environment blocks, inactive sections, and ignored runtime keys.
 - Adds a `Mereb Jenkins` tool window with:
-  - `Preview`: resolved recipe, image/release state, deployment order, ignored fields, and repo-aware warnings
+  - `Overview`: recipe, capabilities, notices, safe fixes, and section state
   - `Flow`: derived pipeline stage sequence
+  - `Relations`: order-to-environment links, unused definitions, inactive sections, and runtime-ignored links
   - `Upstream`: manual schema freshness check against GitHub
+- Adds a dedicated tool window icon and a richer native IntelliJ UI instead of a plain HTML summary.
 - Warns when a user edits a legacy YAML filename instead of the preferred `.ci/ci.mjc`.
 - Pulls the schema from the GitHub source of truth at `https://github.com/leultewolde/mereb-jenkins/blob/main/docs/ci.schema.json` during build, with a checked-in snapshot as a fallback when the remote is unavailable.
 
@@ -25,7 +29,7 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 - Open `.ci/ci.mjc`, `.ci/ci.yml`, or `ci.yml` to get schema validation plus Mereb-specific semantic checks.
 - Use `Tools -> New Mereb Jenkins Config` to scaffold a new recipe-aware config in the current project.
 - Use `Tools -> Migrate Mereb Jenkins Config` from an open config file to preview a conservative migration to `.ci/ci.mjc`.
-- Open the `Mereb Jenkins` tool window to inspect the effective recipe, derived flow, and upstream schema freshness.
+- Open the `Mereb Jenkins` tool window to inspect the effective recipe, capabilities, relations, derived flow, and upstream schema freshness.
 - Use normal IntelliJ quick fixes and hover docs inside supported config files to apply repairs and inspect runtime notes without leaving the editor.
 
 ## Local Build

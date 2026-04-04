@@ -46,6 +46,25 @@ object MerebJenkinsPsiUtils {
         else -> element.textRange
     }
 
+    fun parsePathString(pathString: String): MerebJenkinsPath? {
+        if (pathString.isBlank()) return null
+        var current = MerebJenkinsPath.root()
+        pathString.split('.').forEach { token ->
+            val match = Regex("([A-Za-z0-9_-]+)(\\[(\\d+)])?").matchEntire(token) ?: return@forEach
+            current = current.key(match.groupValues[1])
+            val indexValue = match.groupValues.getOrNull(3)?.takeIf(String::isNotBlank)?.toIntOrNull()
+            if (indexValue != null) {
+                current = current.index(indexValue)
+            }
+        }
+        return current
+    }
+
+    fun findKeyValue(file: YAMLFile, path: MerebJenkinsPath?): YAMLKeyValue? {
+        val element = findBestElement(file, path)
+        return element?.parent as? YAMLKeyValue ?: element as? YAMLKeyValue
+    }
+
     private fun locateElement(file: YAMLFile, path: MerebJenkinsPath?): PsiElement? {
         if (path == null) return null
         var current: PsiElement? = file.documents.firstOrNull()?.topLevelValue
@@ -96,4 +115,3 @@ object MerebJenkinsPsiUtils {
         }
     }
 }
-

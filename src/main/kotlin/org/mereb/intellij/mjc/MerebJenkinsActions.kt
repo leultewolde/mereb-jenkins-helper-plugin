@@ -10,8 +10,6 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.psi.PsiDocumentManager
-import com.intellij.psi.PsiManager
 import java.nio.file.Paths
 
 class MerebJenkinsNewConfigAction : DumbAwareAction("New Mereb Jenkins Config") {
@@ -55,8 +53,6 @@ class MerebJenkinsNewConfigAction : DumbAwareAction("New Mereb Jenkins Config") 
 }
 
 class MerebJenkinsMigrationAssistantAction : DumbAwareAction("Migrate Mereb Jenkins Config") {
-    private val analyzer = MerebJenkinsConfigAnalyzer()
-
     override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
 
     override fun update(event: AnActionEvent) {
@@ -67,54 +63,6 @@ class MerebJenkinsMigrationAssistantAction : DumbAwareAction("Migrate Mereb Jenk
     override fun actionPerformed(event: AnActionEvent) {
         val project = event.project ?: return
         val virtualFile = CommonDataKeys.VIRTUAL_FILE.getData(event.dataContext) ?: return
-        val psiFile = PsiManager.getInstance(project).findFile(virtualFile) ?: return
-        val analysis = analyzer.analyzeDetailed(psiFile.text, virtualFile.path)
-        val plan = MerebJenkinsMigrationPlanner.plan(psiFile, analysis)
-        if (plan.isEmpty()) {
-            Messages.showInfoMessage(project, "No conservative migration changes are needed for this project.", "Mereb Jenkins")
-            return
-        }
-
-        val dialog = MerebJenkinsPreviewDialog(plan)
-        if (!dialog.showAndGet()) {
-            return
-        }
-
-        applyMigration(project, plan)
-    }
-
-    private fun applyMigration(project: Project, plan: MerebJenkinsMigrationPlan) {
-        WriteCommandAction.runWriteCommandAction(project) {
-            plan.changes.forEach { change ->
-                val currentVirtualFile = VfsUtil.findFile(Paths.get(change.currentPath), true) ?: return@forEach
-                val psiFile = PsiManager.getInstance(project).findFile(currentVirtualFile)
-                val document = psiFile?.let { PsiDocumentManager.getInstance(project).getDocument(it) }
-
-                if (document != null) {
-                    document.setText(change.afterText)
-                    PsiDocumentManager.getInstance(project).commitDocument(document)
-                } else {
-                    VfsUtil.saveText(currentVirtualFile, change.afterText)
-                }
-
-                if (change.targetPath != change.currentPath) {
-                    val targetPath = Paths.get(change.targetPath)
-                    val targetDir = VfsUtil.createDirectoryIfMissing(targetPath.parent.toString()) ?: return@forEach
-                    currentVirtualFile.move(this, targetDir)
-                    currentVirtualFile.rename(this, targetPath.fileName.toString())
-                }
-            }
-
-            plan.changes.firstOrNull()?.let { firstChange ->
-                val newFile = VfsUtil.findFile(Paths.get(firstChange.targetPath), true)
-                if (newFile != null) {
-                    FileEditorManager.getInstance(project).openFile(newFile, true)
-                }
-            }
-        }
-
-        if (plan.warnings.isNotEmpty()) {
-            Messages.showInfoMessage(project, plan.warnings.joinToString("\n"), "Mereb Jenkins Migration Notes")
-        }
+        MerebJenkinsWorkbench.runMigrationAssistant(project, virtualFile)
     }
 }
