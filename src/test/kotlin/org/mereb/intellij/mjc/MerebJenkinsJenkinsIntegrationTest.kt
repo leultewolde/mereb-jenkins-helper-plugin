@@ -4,6 +4,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlin.test.assertContains
+import java.nio.file.Files
 import org.junit.jupiter.api.Test
 
 class MerebJenkinsJenkinsIntegrationTest {
@@ -213,6 +215,45 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
+    fun `jenkins client sends an explicit scripted client user agent`() {
+        val capturedHeaders = mutableListOf<Map<String, String>>()
+        val transport = MerebJenkinsHttpTransport { _, headers ->
+            capturedHeaders += headers
+            ok("""{"authenticated":true,"anonymous":false,"name":"leul"}""")
+        }
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.validateConnection()
+
+        assertIs<MerebJenkinsApiResult.Success<MerebJenkinsConnectionValidation>>(result)
+        assertTrue(capturedHeaders.isNotEmpty())
+        assertContains(capturedHeaders.first()["User-Agent"].orEmpty(), "MerebJenkinsHelper")
+        assertContains(capturedHeaders.first()["User-Agent"].orEmpty(), "curl/")
+    }
+
+    @Test
+    fun `jenkins client classifies cloudflare browser integrity blocks as edge filtering`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous" to MerebJenkinsHttpResponse(
+                statusCode = 403,
+                body = "<html><title>Access denied</title><body>Cloudflare Error code 1010 Browser Integrity browser signature banned</body></html>",
+                effectiveUrl = "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous",
+                headers = mapOf(
+                    "server" to listOf("cloudflare"),
+                    "cf-ray" to listOf("abcd"),
+                ),
+            ),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.validateConnection()
+
+        val failure = assertIs<MerebJenkinsApiResult.Failure>(result)
+        assertEquals(MerebJenkinsApiProblemKind.EDGE_FILTERED, failure.problem.kind)
+        assertTrue(failure.problem.message.orEmpty().contains("Cloudflare blocked"))
+    }
+
+    @Test
     fun `jenkins client follows same-origin canonical redirects`() {
         val transport = fakeTransport(
             "https://jenkins.example.com/api/json" to MerebJenkinsHttpResponse(
@@ -338,6 +379,42 @@ class MerebJenkinsJenkinsIntegrationTest {
         val resolved = assertIs<MerebJenkinsJobResolution.Resolved>(resolution)
         assertTrue(resolved.autoSelected)
         assertEquals("RMHY/Mereb/backend/svc-ops/main", resolved.mapping.jobPath)
+    }
+
+    @Test
+    fun `job resolver matches multibranch family using git remote repo slug`() {
+        val workspace = Files.createTempDirectory("mereb-jenkins-resolver")
+        val projectRoot = workspace.resolve("services").resolve("svc-ops")
+        Files.createDirectories(projectRoot)
+        ProcessBuilder("git", "init", projectRoot.toString()).start().waitFor()
+        ProcessBuilder("git", "-C", projectRoot.toString(), "remote", "add", "origin", "git@github.com:leultewolde/mereb-svc-ops.git")
+            .start()
+            .waitFor()
+
+        val matches = MerebJenkinsJobResolver.matchCandidates(
+            workspaceTarget = MerebJenkinsWorkspaceTarget(
+                projectRootPath = projectRoot.toString(),
+                configFilePath = projectRoot.resolve(".ci/ci.mjc").toString(),
+            ),
+            workspaceBasePath = workspace.toString(),
+            candidates = listOf(
+                MerebJenkinsJobCandidate(
+                    "RMHY/Mereb/backend/mereb-svc-ops/main",
+                    "RMHY/Mereb/backend/mereb-svc-ops/main",
+                    "main",
+                    "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/mereb-svc-ops/job/main/",
+                ),
+                MerebJenkinsJobCandidate(
+                    "RMHY/Mereb/backend/mereb-svc-ops/PR-42",
+                    "RMHY/Mereb/backend/mereb-svc-ops/PR-42",
+                    "PR-42",
+                    "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/mereb-svc-ops/job/PR-42/",
+                ),
+            ),
+        )
+
+        assertTrue(matches.isNotEmpty())
+        assertTrue(matches.any { it.kind == MerebJenkinsJobMatchKind.EXACT_BRANCH_FAMILY_PARENT })
     }
 
     private fun fakeTransport(vararg responses: Pair<String, MerebJenkinsHttpResponse>): MerebJenkinsHttpTransport {

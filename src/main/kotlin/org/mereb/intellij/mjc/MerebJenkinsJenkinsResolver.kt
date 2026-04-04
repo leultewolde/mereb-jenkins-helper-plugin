@@ -129,10 +129,16 @@ object MerebJenkinsJobResolver {
         candidates: List<MerebJenkinsJobCandidate>,
     ): List<MerebJenkinsJobCandidateMatch> {
         val workspaceLabel = workspaceLabel(workspaceTarget, workspaceBasePath)
-        val workspacePathLabel = normalizePathLabel(workspaceLabel)
-        val rootNameLabel = normalizePathLabel(Paths.get(workspaceTarget.projectRootPath).fileName?.toString().orEmpty())
-        val workspaceTokens = normalizeTextLabel(workspaceLabel)
-        val rootTokens = normalizeTextLabel(Paths.get(workspaceTarget.projectRootPath).fileName?.toString().orEmpty())
+        val rootName = Paths.get(workspaceTarget.projectRootPath).fileName?.toString().orEmpty()
+        val remoteRepoName = MerebJenkinsGitSupport.remoteRepositoryName(workspaceTarget.projectRootPath).orEmpty()
+        val pathAliases = listOf(workspaceLabel, rootName, remoteRepoName)
+            .map(::normalizePathLabel)
+            .filter { it.isNotBlank() }
+            .distinct()
+        val textAliases = listOf(workspaceLabel, rootName, remoteRepoName)
+            .map(::normalizeTextLabel)
+            .filter { it.isNotBlank() }
+            .distinct()
 
         return candidates.mapNotNull { candidate ->
             val candidateLeafPath = normalizePathLabel(candidate.leafName)
@@ -140,13 +146,12 @@ object MerebJenkinsJobResolver {
             val candidateParentPath = normalizePathLabel(parentJobPath(candidate.jobPath))
             val candidateText = normalizeTextLabel(candidate.jobDisplayName + " " + candidate.jobPath)
             when {
-                candidateLeafPath == rootNameLabel && rootNameLabel.isNotBlank() -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_ROOT_NAME, 400)
-                candidatePath == workspacePathLabel && workspacePathLabel.isNotBlank() -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_WORKSPACE_LABEL, 390)
-                workspacePathLabel.isNotBlank() && candidatePath.endsWith("/$workspacePathLabel") -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_PATH_SUFFIX, 380)
-                rootNameLabel.isNotBlank() && (candidateParentPath == rootNameLabel || candidateParentPath.endsWith("/$rootNameLabel")) ->
+                pathAliases.any { candidateLeafPath == it } -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_ROOT_NAME, 400)
+                pathAliases.any { candidatePath == it } -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_WORKSPACE_LABEL, 390)
+                pathAliases.any { candidatePath.endsWith("/$it") } -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_PATH_SUFFIX, 380)
+                pathAliases.any { candidateParentPath == it || candidateParentPath.endsWith("/$it") } ->
                     MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_BRANCH_FAMILY_PARENT, 385)
-                rootTokens.isNotBlank() && candidateText.contains(rootTokens) -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.CONTAINS, 120)
-                workspaceTokens.isNotBlank() && candidateText.contains(workspaceTokens) -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.CONTAINS, 110)
+                textAliases.any { candidateText.contains(it) } -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.CONTAINS, 120)
                 else -> null
             }
         }.sortedWith(
@@ -159,6 +164,7 @@ object MerebJenkinsJobResolver {
         return listOfNotNull(
             Paths.get(workspaceTarget.projectRootPath).fileName?.toString(),
             workspaceLabel(workspaceTarget, workspaceBasePath).takeIf { it.isNotBlank() },
+            MerebJenkinsGitSupport.remoteRepositoryName(workspaceTarget.projectRootPath)?.takeIf { it.isNotBlank() },
         ).distinct()
     }
 

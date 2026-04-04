@@ -376,6 +376,9 @@ class MerebJenkinsJenkinsClient(
     ): MerebJenkinsApiResult<T> {
         return try {
             val response = transport.get(url, headers())
+            classifyEdgeFilter(response, url)?.let { problem ->
+                return MerebJenkinsApiResult.Failure(problem)
+            }
             when (response.statusCode) {
                 HttpURLConnection.HTTP_OK -> {
                     val payload = yamlLoad.load<Any?>(response.body)
@@ -538,7 +541,36 @@ class MerebJenkinsJenkinsClient(
     private fun headers(): Map<String, String> = mapOf(
         "Accept" to "application/json",
         "Authorization" to authorizationHeader,
+        // Some Cloudflare-protected Jenkins frontends block anonymous/default runtime user agents.
+        "User-Agent" to SCRIPTED_CLIENT_USER_AGENT,
     )
+
+    private fun classifyEdgeFilter(
+        response: MerebJenkinsHttpResponse,
+        requestUrl: String,
+    ): MerebJenkinsApiProblem? {
+        val responseBody = response.body.lowercase()
+        val serverHeader = response.headers["server"]?.joinToString(" ").orEmpty().lowercase()
+        val isCloudflare = serverHeader.contains("cloudflare") ||
+            response.headers.containsKey("cf-ray") ||
+            responseBody.contains("cloudflare")
+        if (!isCloudflare) return null
+
+        val browserIntegrityBlocked = responseBody.contains("error code 1010") ||
+            responseBody.contains("browser integrity") ||
+            responseBody.contains("browser signature banned")
+        val message = if (browserIntegrityBlocked) {
+            "Cloudflare blocked the Jenkins API request before it reached Jenkins. Check Browser Integrity or firewall rules for Jenkins API paths, or allow the plugin's scripted-client user agent."
+        } else {
+            "A CDN or reverse proxy blocked the Jenkins API request before it reached Jenkins."
+        }
+        return MerebJenkinsApiProblem(
+            kind = MerebJenkinsApiProblemKind.EDGE_FILTERED,
+            statusCode = response.statusCode,
+            message = message,
+            requestUrl = requestUrl,
+        )
+    }
 
     private fun absoluteJobUrl(jobPath: String, candidateUrl: String?): String {
         return absoluteUrl(candidateUrl) ?: buildJobUrl(jobPath)
@@ -561,6 +593,7 @@ class MerebJenkinsJenkinsClient(
 
     companion object {
         private const val MAX_REDIRECTS = 5
+        private const val SCRIPTED_CLIENT_USER_AGENT = "curl/8.7.1 MerebJenkinsHelper"
 
         fun encodeJobPath(jobPath: String): String = "/" + MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)
             .split('/')

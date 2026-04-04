@@ -849,6 +849,7 @@ private class MerebJenkinsToolWindowPanel(
             MerebJenkinsApiProblemKind.AUTH -> "Jenkins authentication failed."
             MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER -> "Auth redirect detected."
             MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT -> "Proxy or base URL issue detected."
+            MerebJenkinsApiProblemKind.EDGE_FILTERED -> "Edge or CDN filtering detected."
             MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> "Jenkins is unreachable."
             MerebJenkinsApiProblemKind.NOT_FOUND -> "The mapped Jenkins job no longer exists."
             MerebJenkinsApiProblemKind.INVALID_RESPONSE -> "Jenkins returned a response the plugin could not interpret."
@@ -964,7 +965,7 @@ private class MerebJenkinsToolWindowPanel(
         val status = when (problem.kind) {
             MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
             MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER -> MerebJenkinsConnectionStatus.REDIRECTED_TO_LOGIN
-            MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT -> MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE
+            MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT, MerebJenkinsApiProblemKind.EDGE_FILTERED -> MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE
             MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
             else -> MerebJenkinsConnectionStatus.ERROR
         }
@@ -988,6 +989,8 @@ private class MerebJenkinsToolWindowPanel(
                 "Use a Jenkins API token. If this token is valid, your Jenkins OIDC/proxy setup may be intercepting API requests."
             problem.kind == MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT ->
                 "Check JENKINS_PUBLIC_URL, proxy redirects, and controller canonical URL handling."
+            problem.kind == MerebJenkinsApiProblemKind.EDGE_FILTERED ->
+                "A CDN or reverse proxy blocked the scripted API request before Jenkins handled it."
             snapshot.baseUrl.isNotBlank() -> snapshot.baseUrl
             else -> "Configure Jenkins"
         }

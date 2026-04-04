@@ -71,6 +71,7 @@ enum class MerebJenkinsApiProblemKind {
     AUTH,
     LOGIN_REDIRECT_WITH_AUTH_HEADER,
     CROSS_ORIGIN_REDIRECT,
+    EDGE_FILTERED,
     NOT_FOUND,
     UNREACHABLE,
     TIMEOUT,

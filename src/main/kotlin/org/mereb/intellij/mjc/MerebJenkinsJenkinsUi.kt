@@ -411,7 +411,7 @@ private fun escapeHtml(value: String): String = buildString(value.length) {
 private fun connectionStatusForProblem(problem: MerebJenkinsApiProblem): MerebJenkinsConnectionStatus = when (problem.kind) {
     MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
     MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER -> MerebJenkinsConnectionStatus.REDIRECTED_TO_LOGIN
-    MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT -> MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE
+    MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT, MerebJenkinsApiProblemKind.EDGE_FILTERED -> MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE
     MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
     else -> MerebJenkinsConnectionStatus.ERROR
 }
