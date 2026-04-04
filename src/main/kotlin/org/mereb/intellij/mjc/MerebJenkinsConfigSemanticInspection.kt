@@ -12,14 +12,13 @@ class MerebJenkinsConfigSemanticInspection : LocalInspectionTool() {
         manager: InspectionManager,
         isOnTheFly: Boolean,
     ): Array<ProblemDescriptor> {
-        val virtualFile = file.virtualFile ?: return ProblemDescriptor.EMPTY_ARRAY
-        if (!MerebJenkinsConfigPaths.isSchemaTarget(virtualFile)) {
+        if (!MerebJenkinsConfigPaths.isSchemaTarget(file)) {
             return ProblemDescriptor.EMPTY_ARRAY
         }
 
         val analysis = MerebJenkinsAnalysisCache.forFile(file)
         return analysis.findings.map { finding ->
-            val psiElement = MerebJenkinsPsiUtils.findBestElement(file, finding.path, finding.anchorPath) ?: file
+            val psiElement = MerebJenkinsPsiUtils.findBestProblemElement(file, finding.path, finding.anchorPath) ?: file
             manager.createProblemDescriptor(
                 psiElement,
                 finding.message,

@@ -1,5 +1,5 @@
 <idea-plugin>
-    <id>org.mereb.intellij.mjc</id>
+    <id>org.mereb.jenkins.helper</id>
     <name>Mereb Jenkins Helper</name>
     <vendor>Mereb</vendor>
     <description><![CDATA[
@@ -13,6 +13,8 @@
     <depends>org.jetbrains.plugins.yaml</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="Mereb Jenkins" displayType="BALLOON" isLogByDefault="true"/>
+        <postStartupActivity implementation="org.mereb.intellij.mjc.MerebJenkinsOnboardingActivity"/>
         <fileType
                 name="Mereb Jenkins Configuration"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigurationFileType"
@@ -20,18 +22,22 @@
                 language="yaml"
                 extensions="mjc"/>
         <jsonSchemaProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
+        <lang.inspectionSuppressor
+                language="yaml"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsInspectionSuppressor"/>
         <lang.syntaxHighlighterFactory
-                language="YAML"
+                language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsSyntaxHighlighterFactory"/>
         <colorSettingsPage implementation="org.mereb.intellij.mjc.MerebJenkinsColorSettingsPage"/>
         <completion.contributor
-                language="YAML"
+                language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsCompletionContributor"/>
+        <typedHandler implementation="org.mereb.intellij.mjc.MerebJenkinsCompletionTypedHandler"/>
         <lang.documentationProvider
-                language="YAML"
+                language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsDocumentationProvider"/>
         <codeInsight.inlayProvider
-                language="YAML"
+                language="yaml"
                 id="MerebJenkinsBlockMetadata"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsBlockInlayHintsProvider"/>
         <toolWindow id="Mereb Jenkins"
@@ -40,13 +46,13 @@
                     factoryClass="org.mereb.intellij.mjc.MerebJenkinsToolWindowFactory"
                     canCloseContents="false"/>
         <annotator
-                language="YAML"
+                language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsRelationAnnotator"/>
         <annotator
-                language="YAML"
+                language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsScalarAnnotator"/>
         <localInspection
-                language="YAML"
+                language="yaml"
                 shortName="LegacyMerebJenkinsConfigFilename"
                 displayName="Legacy Mereb Jenkins config filename"
                 groupName="Mereb Jenkins"
@@ -54,7 +60,7 @@
                 level="WEAK WARNING"
                 implementationClass="org.mereb.intellij.mjc.LegacyMerebJenkinsConfigInspection"/>
         <localInspection
-                language="YAML"
+                language="yaml"
                 shortName="MerebJenkinsConfigSemantics"
                 displayName="Mereb Jenkins config semantics"
                 groupName="Mereb Jenkins"
@@ -64,17 +70,24 @@
     </extensions>
 
     <actions>
-        <action id="org.mereb.intellij.mjc.NewConfig"
+        <action id="org.mereb.jenkins.helper.NewConfig"
                 class="org.mereb.intellij.mjc.MerebJenkinsNewConfigAction"
                 text="New Mereb Jenkins Config"
                 description="Create a recipe-aware Mereb Jenkins config">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
         </action>
-        <action id="org.mereb.intellij.mjc.MigrateConfig"
+        <action id="org.mereb.jenkins.helper.MigrateConfig"
                 class="org.mereb.intellij.mjc.MerebJenkinsMigrationAssistantAction"
                 text="Migrate Mereb Jenkins Config"
                 description="Preview and apply a conservative migration to .ci/ci.mjc">
             <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+        <action id="org.mereb.jenkins.helper.HowTo"
+                class="org.mereb.intellij.mjc.MerebJenkinsHowToAction"
+                text="How To Use Mereb Jenkins Helper"
+                description="Show the built-in guide for the Mereb Jenkins plugin">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <add-to-group group-id="HelpMenu" anchor="last"/>
         </action>
     </actions>
 </idea-plugin>

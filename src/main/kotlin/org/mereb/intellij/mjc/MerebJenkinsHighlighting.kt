@@ -7,12 +7,12 @@ import org.jetbrains.yaml.YAMLHighlighter
 object MerebJenkinsHighlighting {
     val KEY: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
         "MEREB_JENKINS_KEY",
-        YAMLHighlighter.SCALAR_KEY,
+        DefaultLanguageHighlighterColors.KEYWORD,
     )
 
     val VALUE: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
         "MEREB_JENKINS_VALUE",
-        YAMLHighlighter.SCALAR_TEXT,
+        DefaultLanguageHighlighterColors.STRING,
     )
 
     val LITERAL: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
@@ -22,7 +22,7 @@ object MerebJenkinsHighlighting {
 
     val COMMENT: TextAttributesKey = TextAttributesKey.createTextAttributesKey(
         "MEREB_JENKINS_COMMENT",
-        YAMLHighlighter.COMMENT,
+        DefaultLanguageHighlighterColors.LINE_COMMENT,
     )
 
     val BLOCK_METADATA: TextAttributesKey = TextAttributesKey.createTextAttributesKey(

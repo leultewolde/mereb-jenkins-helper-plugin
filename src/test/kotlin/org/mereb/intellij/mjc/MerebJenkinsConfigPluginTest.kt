@@ -4,6 +4,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import java.nio.file.Files
 import org.junit.jupiter.api.Test
 import org.jetbrains.yaml.YAMLTokenTypes
 
@@ -37,11 +38,29 @@ class MerebJenkinsConfigPluginTest {
     }
 
     @Test
+    fun `built in how to guide resource is available`() {
+        val html = MerebJenkinsHowToSupport.loadHowToHtml()
+
+        assertTrue(html.contains("Mereb Jenkins Helper"))
+        assertTrue(html.contains(".ci/ci.mjc"))
+    }
+
+    @Test
     fun `legacy inspection message points users to the preferred filename`() {
         assertEquals(
             "Prefer .ci/ci.mjc for Mereb Jenkins configs. Legacy filenames are still supported.",
             LegacyMerebJenkinsConfigInspection.MESSAGE
         )
+    }
+
+    @Test
+    fun `inspection suppression policy keeps mereb checks but suppresses unrelated lint`() {
+        assertTrue(MerebJenkinsInspectionSuppressionPolicy.shouldSuppressPath("/tmp/repo/.ci/ci.mjc", "sonar-yaml:S1234"))
+        assertTrue(MerebJenkinsInspectionSuppressionPolicy.shouldSuppressPath("/tmp/repo/.ci/ci.yml", "YAMLLint"))
+        assertFalse(MerebJenkinsInspectionSuppressionPolicy.shouldSuppressPath("/tmp/repo/.ci/ci.mjc", "MerebJenkinsConfigSemantics"))
+        assertFalse(MerebJenkinsInspectionSuppressionPolicy.shouldSuppressPath("/tmp/repo/.ci/ci.mjc", "LegacyMerebJenkinsConfigFilename"))
+        assertFalse(MerebJenkinsInspectionSuppressionPolicy.shouldSuppressPath("/tmp/repo/.ci/ci.mjc", "JsonSchemaCompliance"))
+        assertFalse(MerebJenkinsInspectionSuppressionPolicy.shouldSuppressPath("/tmp/repo/app.yml", "sonar-yaml:S1234"))
     }
 
     @Test
@@ -119,6 +138,31 @@ class MerebJenkinsConfigPluginTest {
         val scan = MerebJenkinsProjectScanner.scan("/tmp/mereb-social/web/mfe-admin/.ci/ci.yml")
         assertEquals("/tmp/mereb-social/web/mfe-admin", scan.projectRootPath)
         assertEquals("microfrontend", scan.expectedRecipe)
+    }
+
+    @Test
+    fun `workspace discovery prefers ci mjc and returns multiple targets`() {
+        val workspace = Files.createTempDirectory("mereb-mjc-workspace")
+        try {
+            val alpha = workspace.resolve("services").resolve("svc-auth")
+            Files.createDirectories(alpha.resolve(".ci"))
+            Files.writeString(alpha.resolve(".ci/ci.yml"), "version: 1\nrecipe: service\n")
+            Files.writeString(alpha.resolve(".ci/ci.mjc"), "version: 1\nrecipe: service\n")
+            Files.writeString(alpha.resolve("Jenkinsfile"), "ciV1(configPath: '.ci/ci.mjc')\n")
+
+            val beta = workspace.resolve("packages").resolve("app-admin")
+            Files.createDirectories(beta.resolve(".ci"))
+            Files.writeString(beta.resolve(".ci/ci.yml"), "version: 1\nrecipe: package\n")
+            Files.writeString(beta.resolve("Jenkinsfile"), "ciV1(configPath: '.ci/ci.yml')\n")
+
+            val targets = MerebJenkinsProjectScanner.discoverWorkspaceTargets(workspace.toString())
+
+            assertEquals(2, targets.size)
+            assertTrue(targets.any { it.projectRootPath == alpha.toString() && it.configFilePath.endsWith(".ci/ci.mjc") })
+            assertTrue(targets.any { it.projectRootPath == beta.toString() && it.configFilePath.endsWith(".ci/ci.yml") })
+        } finally {
+            workspace.toFile().deleteRecursively()
+        }
     }
 
     @Test

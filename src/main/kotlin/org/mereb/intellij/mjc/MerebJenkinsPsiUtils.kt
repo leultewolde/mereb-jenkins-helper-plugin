@@ -15,8 +15,16 @@ import org.jetbrains.yaml.psi.YAMLValue
 object MerebJenkinsPsiUtils {
     fun findBestElement(file: PsiFile, path: MerebJenkinsPath?, anchorPath: MerebJenkinsPath? = null): PsiElement? {
         val yamlFile = file as? YAMLFile ?: return file
-        return locateElement(yamlFile, path)
-            ?: locateElement(yamlFile, anchorPath)
+        return locateElement(yamlFile, path, preferValue = false)
+            ?: locateElement(yamlFile, anchorPath, preferValue = false)
+            ?: firstMeaningfulElement(yamlFile)
+            ?: file
+    }
+
+    fun findBestProblemElement(file: PsiFile, path: MerebJenkinsPath?, anchorPath: MerebJenkinsPath? = null): PsiElement? {
+        val yamlFile = file as? YAMLFile ?: return file
+        return locateElement(yamlFile, path, preferValue = true)
+            ?: locateElement(yamlFile, anchorPath, preferValue = true)
             ?: firstMeaningfulElement(yamlFile)
             ?: file
     }
@@ -68,11 +76,11 @@ object MerebJenkinsPsiUtils {
     }
 
     fun findKeyValue(file: YAMLFile, path: MerebJenkinsPath?): YAMLKeyValue? {
-        val element = findBestElement(file, path)
+        val element = locateElement(file, path, preferValue = false) ?: findBestElement(file, path)
         return element?.parent as? YAMLKeyValue ?: element as? YAMLKeyValue
     }
 
-    private fun locateElement(file: YAMLFile, path: MerebJenkinsPath?): PsiElement? {
+    private fun locateElement(file: YAMLFile, path: MerebJenkinsPath?, preferValue: Boolean): PsiElement? {
         if (path == null) return null
         var current: PsiElement? = file.documents.firstOrNull()?.topLevelValue
         if (current == null) {
@@ -87,7 +95,12 @@ object MerebJenkinsPsiUtils {
         }
 
         return when (current) {
-            is YAMLKeyValue -> current.key ?: current
+            is YAMLKeyValue -> {
+                when {
+                    preferValue && current.value != null -> current.value
+                    else -> current.key ?: current
+                }
+            }
             else -> current
         }
     }

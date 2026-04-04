@@ -6,6 +6,7 @@ import com.intellij.codeInsight.completion.CompletionProvider
 import com.intellij.codeInsight.completion.CompletionResultSet
 import com.intellij.codeInsight.lookup.LookupElementBuilder
 import com.intellij.openapi.editor.Document
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.patterns.PlatformPatterns.psiElement
 import com.intellij.util.ProcessingContext
 
@@ -20,8 +21,12 @@ class MerebJenkinsCompletionContributor : CompletionContributor() {
                     context: ProcessingContext,
                     result: CompletionResultSet,
                 ) {
-                    val file = parameters.originalFile.virtualFile ?: return
-                    if (!MerebJenkinsConfigPaths.isSchemaTarget(file)) return
+                    val documentBackedFile = FileDocumentManager.getInstance().getFile(parameters.editor.document)
+                    val psiFile = parameters.position.containingFile ?: parameters.originalFile
+                    val isTarget = documentBackedFile?.let { MerebJenkinsConfigPaths.isSchemaTarget(it) } == true
+                        || MerebJenkinsConfigPaths.isSchemaTarget(psiFile)
+                        || MerebJenkinsConfigPaths.isSchemaTarget(parameters.originalFile)
+                    if (!isTarget) return
                     val document = parameters.editor.document
                     val path = MerebJenkinsPsiUtils.elementPathString(parameters.position)
                         ?: MerebJenkinsPsiUtils.elementPathString(parameters.position.parent)

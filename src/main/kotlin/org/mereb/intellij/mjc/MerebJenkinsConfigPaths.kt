@@ -2,6 +2,7 @@ package org.mereb.intellij.mjc
 
 import com.intellij.openapi.util.io.FileUtilRt
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiFile
 
 object MerebJenkinsConfigPaths {
     const val PRIMARY_CONFIG = ".ci/ci.mjc"
@@ -10,6 +11,12 @@ object MerebJenkinsConfigPaths {
 
     fun isSchemaTarget(virtualFile: VirtualFile): Boolean {
         return isSchemaTargetPath(virtualFile.path)
+    }
+
+    fun isSchemaTarget(file: PsiFile): Boolean {
+        return file.virtualFile?.let(::isSchemaTarget)
+            ?: file.viewProvider.virtualFile?.let(::isSchemaTarget)
+            ?: false
     }
 
     fun isLegacy(virtualFile: VirtualFile): Boolean {

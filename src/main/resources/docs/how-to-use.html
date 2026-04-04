@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 18px;
+      line-height: 1.55;
+      color: #1f2937;
+    }
+    h1, h2 {
+      margin-bottom: 0.4rem;
+      color: #0f172a;
+    }
+    p, li {
+      margin-top: 0.4rem;
+      margin-bottom: 0.4rem;
+    }
+    code {
+      font-family: "JetBrains Mono", "SFMono-Regular", monospace;
+      background: #eef2ff;
+      padding: 0.1rem 0.35rem;
+      border-radius: 4px;
+    }
+    .callout {
+      background: #f8fafc;
+      border: 1px solid #cbd5e1;
+      border-radius: 10px;
+      padding: 12px 14px;
+      margin: 14px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>Mereb Jenkins Helper</h1>
+  <p>
+    Mereb Jenkins Helper is built around one project unit: a Mereb config file plus its sibling
+    <code>Jenkinsfile</code>. The plugin now auto-detects that pair for the current project instead
+    of requiring the config file to be the active editor tab.
+  </p>
+
+  <div class="callout">
+    <strong>Preferred config path:</strong> <code>.ci/ci.mjc</code><br/>
+    Legacy files <code>.ci/ci.yml</code> and <code>ci.yml</code> still work and can be migrated.
+  </div>
+
+  <h2>How the tool window works</h2>
+  <ul>
+    <li>Open the <code>Mereb Jenkins</code> tool window from the right-side tool window bar.</li>
+    <li>If the workspace contains one Mereb project, the tool window focuses it automatically.</li>
+    <li>If the workspace contains multiple Mereb projects, use the <code>Project</code> selector in the tool window header to choose which one to inspect.</li>
+    <li>The tool window refreshes automatically when the focused config or sibling <code>Jenkinsfile</code> changes.</li>
+  </ul>
+
+  <h2>What to do in the editor</h2>
+  <ul>
+    <li>Use normal completion while typing for known keys and values such as <code>recipe</code>, <code>delivery.mode</code>, and <code>release.autoTag.bump</code>.</li>
+    <li>Hover important keys to see Mereb-specific runtime notes and defaults.</li>
+    <li>Use quick fixes when the plugin flags issues like missing <code>recipe</code>, invalid environment order, or legacy config paths.</li>
+    <li>Look for inline block descriptions above important sections such as <code>deploy</code>, <code>image</code>, and <code>release</code>.</li>
+  </ul>
+
+  <h2>Useful actions</h2>
+  <ul>
+    <li><code>Tools -&gt; New Mereb Jenkins Config</code> creates a starter <code>.ci/ci.mjc</code>.</li>
+    <li><code>Tools -&gt; Migrate Mereb Jenkins Config</code> previews a conservative migration from legacy filenames or older config shapes.</li>
+    <li><code>Tools -&gt; How To Use Mereb Jenkins Helper</code> reopens this guide at any time.</li>
+  </ul>
+
+  <h2>How to read the tool window</h2>
+  <ul>
+    <li><strong>Overview</strong>: resolved recipe, enabled capabilities, notices, and safe fixes.</li>
+    <li><strong>Flow</strong>: the derived runtime sequence the current config implies.</li>
+    <li><strong>Relations</strong>: links between order lists and environment blocks, plus unused or missing definitions.</li>
+    <li><strong>Upstream</strong>: manual schema freshness check against the current GitHub schema.</li>
+  </ul>
+</body>
+</html>

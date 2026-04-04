@@ -12,8 +12,7 @@ import com.intellij.psi.PsiElement
 class MerebJenkinsRelationAnnotator : Annotator {
     override fun annotate(element: PsiElement, holder: AnnotationHolder) {
         val containingFile = element.containingFile ?: return
-        val virtualFile = containingFile.virtualFile ?: return
-        if (!MerebJenkinsConfigPaths.isSchemaTarget(virtualFile)) return
+        if (!MerebJenkinsConfigPaths.isSchemaTarget(containingFile)) return
 
         val path = MerebJenkinsPsiUtils.elementPathString(element) ?: return
         val analysis = MerebJenkinsAnalysisCache.forFile(containingFile)

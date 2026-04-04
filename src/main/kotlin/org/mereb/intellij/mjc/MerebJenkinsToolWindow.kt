@@ -11,10 +11,12 @@ import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.util.Condition
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
@@ -43,10 +45,10 @@ import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
+import javax.swing.JList
 import com.intellij.openapi.editor.EditorFactory
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
-import kotlin.io.path.exists
 
 class MerebJenkinsToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
@@ -71,8 +73,12 @@ private class MerebJenkinsToolWindowPanel(
 
     @Volatile private var disposed = false
     @Volatile private var upstreamRefreshTask: Future<*>? = null
+    private var workspaceRescanRequested = true
     private var currentVirtualFile: VirtualFile? = null
     private var currentAnalysis: MerebJenkinsAnalysisResult? = null
+    private var currentTarget: MerebJenkinsWorkspaceTarget? = null
+    private var availableTargets: List<MerebJenkinsWorkspaceTarget> = emptyList()
+    private var updatingTargetSelector = false
 
     private val root = JPanel(BorderLayout(0, 12)).apply {
         border = JBUI.Borders.empty(12)
@@ -81,7 +87,9 @@ private class MerebJenkinsToolWindowPanel(
     private val titleLabel = JBLabel("Mereb Jenkins", toolWindowIcon(), JBLabel.LEADING).apply {
         font = JBFont.h3().asBold()
     }
-    private val subtitleLabel = JBLabel("Select a Mereb Jenkins config to inspect pipeline behavior.")
+    private val subtitleLabel = JBLabel("Detecting Mereb Jenkins project context…")
+    private val targetLabel = JBLabel("Project:")
+    private val targetSelector = ComboBox<MerebJenkinsWorkspaceTarget>()
     private val refreshButton = JButton("Refresh")
     private val safeFixesButton = JButton("Apply Safe Fixes")
     private val recipeButton = JButton("Set Recipe")
@@ -122,8 +130,14 @@ private class MerebJenkinsToolWindowPanel(
         openJenkinsfileButton.addActionListener { openJenkinsfile() }
         migrateButton.addActionListener { runMigration() }
         checkUpstreamButton.addActionListener { refreshUpstream() }
+        targetSelector.addActionListener {
+            if (updatingTargetSelector) return@addActionListener
+            currentTarget = targetSelector.selectedItem as? MerebJenkinsWorkspaceTarget
+            scheduleRefresh(delayMs = 0)
+        }
 
         configureLists()
+        configureTargetSelector()
         buildUi()
 
         project.messageBus.connect(this).subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER, object : FileEditorManagerListener {
@@ -133,18 +147,21 @@ private class MerebJenkinsToolWindowPanel(
         })
         project.messageBus.connect(this).subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
             override fun after(events: List<VFileEvent>) {
-                val trackedPath = currentVirtualFile?.path
-                if (trackedPath != null && events.any { it.path == trackedPath }) {
-                    scheduleRefresh()
+                if (events.isEmpty()) return
+                val needsWorkspaceRescan = events.any { isWorkspaceTargetChange(it.path) }
+                val target = currentTarget
+                if (needsWorkspaceRescan || (target != null && events.any { target.isTrackedArtifact(it.path) })) {
+                    scheduleRefresh(rescanWorkspace = needsWorkspaceRescan)
                 }
             }
         })
         EditorFactory.getInstance().eventMulticaster.addDocumentListener(object : DocumentListener {
             override fun documentChanged(event: DocumentEvent) {
                 val file = FileDocumentManager.getInstance().getFile(event.document) ?: return
-                if (!MerebJenkinsConfigPaths.isSchemaTarget(file)) return
-                if (file == currentVirtualFile || file == selectedConfigFile()) {
-                    scheduleRefresh()
+                val target = currentTarget
+                val needsWorkspaceRescan = isWorkspaceTargetChange(file.path)
+                if (needsWorkspaceRescan || (target != null && target.isTrackedArtifact(file.path))) {
+                    scheduleRefresh(rescanWorkspace = needsWorkspaceRescan)
                 }
             }
         }, this)
@@ -173,6 +190,8 @@ private class MerebJenkinsToolWindowPanel(
         }
         val right = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 0)).apply {
             isOpaque = false
+            add(targetLabel)
+            add(targetSelector)
             add(refreshButton)
             add(checkUpstreamButton)
         }
@@ -322,13 +341,36 @@ private class MerebJenkinsToolWindowPanel(
         })
     }
 
+    private fun configureTargetSelector() {
+        targetLabel.isVisible = false
+        targetSelector.isVisible = false
+        targetSelector.preferredSize = JBUI.size(260, 28)
+        targetSelector.renderer = object : ColoredListCellRenderer<MerebJenkinsWorkspaceTarget>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsWorkspaceTarget>,
+                value: MerebJenkinsWorkspaceTarget?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(workspaceTargetLabel(value), SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                value.jenkinsfilePath?.let {
+                    append("  Jenkinsfile", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                }
+            }
+        }
+    }
+
     private fun refreshCurrentFile() {
         if (disposed || project.isDisposed) return
-        currentVirtualFile = selectedConfigFile()
+        resolveWorkspaceFocus()
+        val target = currentTarget
+        currentVirtualFile = target?.let { VfsUtil.findFile(Paths.get(it.configFilePath), true) }
         val selectedConfig = currentVirtualFile
-        if (selectedConfig == null) {
+        if (target == null || selectedConfig == null) {
             titleLabel.text = "Mereb Jenkins"
-            subtitleLabel.text = "Select a Mereb Jenkins config to inspect pipeline behavior."
+            subtitleLabel.text = "No Mereb Jenkins project detected in this workspace."
             currentAnalysis = null
             clearModels()
             updateCards(null)
@@ -336,13 +378,14 @@ private class MerebJenkinsToolWindowPanel(
             return
         }
 
-        val document = FileEditorManager.getInstance(project).selectedTextEditor?.document
+        val document = FileDocumentManager.getInstance().getCachedDocument(selectedConfig)
+            ?: FileDocumentManager.getInstance().getDocument(selectedConfig)
         val text = document?.text ?: selectedConfig.inputStream.bufferedReader().use { it.readText() }
         val analysis = analyzer.analyzeDetailed(text, selectedConfig.path)
         currentAnalysis = analysis
 
         titleLabel.text = analysis.summary.explicitRecipe?.let { "Mereb Jenkins: $it" } ?: "Mereb Jenkins: ${analysis.summary.resolvedRecipe}"
-        subtitleLabel.text = buildSubtitle(selectedConfig, analysis)
+        subtitleLabel.text = buildSubtitle(target, analysis)
 
         refill(findingsModel, analysis.findings)
         refill(sectionsModel, analysis.summary.sections)
@@ -474,7 +517,7 @@ private class MerebJenkinsToolWindowPanel(
         migrateButton.isEnabled = currentVirtualFile != null
     }
 
-    private fun buildSubtitle(file: VirtualFile, analysis: MerebJenkinsAnalysisResult): String {
+    private fun buildSubtitle(target: MerebJenkinsWorkspaceTarget, analysis: MerebJenkinsAnalysisResult): String {
         val extras = mutableListOf<String>()
         if (analysis.summary.referencedButMissing.isNotEmpty()) {
             extras += "${analysis.summary.referencedButMissing.size} missing relation${if (analysis.summary.referencedButMissing.size == 1) "" else "s"}"
@@ -486,7 +529,12 @@ private class MerebJenkinsToolWindowPanel(
             extras += "YAML parse issue"
         }
         return buildString {
-            append(file.path)
+            append(workspaceTargetLabel(target))
+            append("  •  ")
+            append(relativeConfigLabel(target))
+            if (target.jenkinsfilePath != null) {
+                append(" + Jenkinsfile")
+            }
             if (extras.isNotEmpty()) {
                 append("  •  ")
                 append(extras.joinToString(" • "))
@@ -500,14 +548,78 @@ private class MerebJenkinsToolWindowPanel(
         upstreamErrorLabel.text = ""
     }
 
-    private fun scheduleRefresh(delayMs: Int = 300) {
+    private fun scheduleRefresh(delayMs: Int = 300, rescanWorkspace: Boolean = false) {
         if (disposed || project.isDisposed) return
+        if (rescanWorkspace) {
+            workspaceRescanRequested = true
+        }
         refreshAlarm.cancelAllRequests()
         refreshAlarm.addRequest({ refreshCurrentFile() }, delayMs)
     }
 
-    private fun selectedConfigFile(): VirtualFile? {
-        return FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.takeIf { MerebJenkinsConfigPaths.isSchemaTarget(it) }
+    private fun resolveWorkspaceFocus() {
+        if (workspaceRescanRequested || availableTargets.isEmpty()) {
+            availableTargets = MerebJenkinsProjectScanner.discoverWorkspaceTargets(project.basePath)
+            workspaceRescanRequested = false
+        }
+
+        if (availableTargets.isEmpty()) {
+            currentTarget = null
+            updateTargetSelector()
+            return
+        }
+
+        val selectedFilePath = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.path
+        val existingRoot = currentTarget?.projectRootPath
+        val targetFromSelection = selectedFilePath?.let { path ->
+            availableTargets.firstOrNull { it.ownsPath(path) }
+        }
+        val retainedTarget = existingRoot?.let { root ->
+            availableTargets.firstOrNull { it.projectRootPath == root }
+        }
+
+        currentTarget = retainedTarget
+            ?: targetFromSelection
+            ?: availableTargets.first()
+        updateTargetSelector()
+    }
+
+    private fun updateTargetSelector() {
+        updatingTargetSelector = true
+        try {
+            targetSelector.removeAllItems()
+            availableTargets.forEach(targetSelector::addItem)
+            val multiTarget = availableTargets.size > 1
+            targetLabel.isVisible = multiTarget
+            targetSelector.isVisible = multiTarget
+            currentTarget?.let { target ->
+                val match = availableTargets.firstOrNull { it.projectRootPath == target.projectRootPath }
+                if (match != null) {
+                    targetSelector.selectedItem = match
+                }
+            }
+        } finally {
+            updatingTargetSelector = false
+        }
+    }
+
+    private fun workspaceTargetLabel(target: MerebJenkinsWorkspaceTarget): String {
+        val workspaceRoot = project.basePath?.let { runCatching { Paths.get(it).normalize() }.getOrNull() }
+        val projectRoot = runCatching { Paths.get(target.projectRootPath).normalize() }.getOrNull()
+            ?: return target.projectRootPath.substringAfterLast('/')
+        return workspaceRoot
+            ?.takeIf { projectRoot.startsWith(it) }
+            ?.let { root ->
+                runCatching { root.relativize(projectRoot).toString().ifBlank { projectRoot.fileName?.toString().orEmpty() } }.getOrNull()
+            }
+            ?: projectRoot.fileName?.toString()
+            ?: target.projectRootPath
+    }
+
+    private fun relativeConfigLabel(target: MerebJenkinsWorkspaceTarget): String {
+        val projectRoot = runCatching { Paths.get(target.projectRootPath) }.getOrNull() ?: return target.configFilePath
+        val configPath = runCatching { Paths.get(target.configFilePath) }.getOrNull() ?: return target.configFilePath
+        return runCatching { projectRoot.relativize(configPath).toString() }.getOrDefault(target.configFilePath)
     }
 
     private fun clearModels() {
@@ -604,8 +716,19 @@ private fun doubleClickListener(action: () -> Unit): MouseAdapter = object : Mou
 }
 
 private fun projectContainsSupportedConfig(basePath: String): Boolean {
-    val root = Paths.get(basePath)
-    return MerebJenkinsConfigPaths.supportedRelativePaths().any { root.resolve(it).exists() }
+    return MerebJenkinsProjectScanner.discoverWorkspaceTargets(basePath).isNotEmpty()
+}
+
+private fun MerebJenkinsWorkspaceTarget.isTrackedArtifact(path: String): Boolean {
+    return path == configFilePath || path == jenkinsfilePath
+}
+
+private fun MerebJenkinsWorkspaceTarget.ownsPath(path: String): Boolean {
+    return path == projectRootPath || path.startsWith("$projectRootPath/")
+}
+
+private fun isWorkspaceTargetChange(path: String): Boolean {
+    return path.endsWith("/Jenkinsfile") || path == "Jenkinsfile" || MerebJenkinsConfigPaths.isSchemaTargetPath(path)
 }
 
 private object ColorPalette {

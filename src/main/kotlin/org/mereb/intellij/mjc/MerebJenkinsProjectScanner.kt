@@ -2,13 +2,26 @@ package org.mereb.intellij.mjc
 
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.Files
+import java.nio.file.FileVisitResult
+import java.nio.file.attribute.BasicFileAttributes
 import kotlin.io.path.exists
 import kotlin.io.path.isDirectory
 import kotlin.io.path.name
 import kotlin.io.path.readText
 
+data class MerebJenkinsWorkspaceTarget(
+    val projectRootPath: String,
+    val configFilePath: String,
+    val jenkinsfilePath: String? = null,
+    val jenkinsfileConfigPath: String? = null,
+    val expectedRecipe: String? = null,
+)
+
 object MerebJenkinsProjectScanner {
     private val configPathPattern = Regex("configPath\\s*:\\s*['\"]([^'\"]+)['\"]")
+    private val skippedDirectories = setOf(".git", ".idea", ".gradle", "build", "out", "dist", "target", "node_modules", ".next", "coverage")
 
     fun scan(configFilePath: String?): MerebJenkinsProjectScan {
         if (configFilePath.isNullOrBlank()) {
@@ -59,5 +72,64 @@ object MerebJenkinsProjectScanner {
             grandParent == "infra" && parent == "charts" -> "build"
             else -> null
         }
+    }
+
+    fun discoverWorkspaceTargets(basePath: String?): List<MerebJenkinsWorkspaceTarget> {
+        if (basePath.isNullOrBlank()) return emptyList()
+        val workspaceRoot = runCatching { Paths.get(basePath).normalize() }.getOrNull() ?: return emptyList()
+        if (!workspaceRoot.exists()) return emptyList()
+
+        val targetsByRoot = linkedMapOf<String, MerebJenkinsWorkspaceTarget>()
+
+        Files.walkFileTree(workspaceRoot, object : SimpleFileVisitor<Path>() {
+            override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                return if (dir != workspaceRoot && dir.fileName?.toString() in skippedDirectories) {
+                    FileVisitResult.SKIP_SUBTREE
+                } else {
+                    FileVisitResult.CONTINUE
+                }
+            }
+
+            override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                if (!MerebJenkinsConfigPaths.isSchemaTargetPath(file.toString())) {
+                    return FileVisitResult.CONTINUE
+                }
+
+                val scan = scan(file.toString())
+                val root = scan.projectRootPath ?: return FileVisitResult.CONTINUE
+                val target = MerebJenkinsWorkspaceTarget(
+                    projectRootPath = root,
+                    configFilePath = scan.configFilePath ?: file.toString(),
+                    jenkinsfilePath = scan.jenkinsfilePath,
+                    jenkinsfileConfigPath = scan.jenkinsfileConfigPath,
+                    expectedRecipe = scan.expectedRecipe,
+                )
+
+                val existing = targetsByRoot[root]
+                if (existing == null || configPriority(target.configFilePath) < configPriority(existing.configFilePath)) {
+                    targetsByRoot[root] = target
+                }
+
+                return FileVisitResult.CONTINUE
+            }
+        })
+
+        return targetsByRoot.values.sortedWith(
+            compareBy<MerebJenkinsWorkspaceTarget> { relativeRootLabel(workspaceRoot, it.projectRootPath) }
+                .thenBy { it.configFilePath }
+        )
+    }
+
+    private fun relativeRootLabel(workspaceRoot: Path, rootPath: String): String {
+        val root = runCatching { Paths.get(rootPath) }.getOrNull() ?: return rootPath
+        return runCatching { workspaceRoot.relativize(root).toString().ifBlank { root.fileName?.toString().orEmpty() } }
+            .getOrDefault(root.fileName?.toString().orEmpty())
+    }
+
+    private fun configPriority(path: String): Int = when {
+        path.endsWith("/.ci/ci.mjc") || path == ".ci/ci.mjc" -> 0
+        path.endsWith("/.ci/ci.yml") || path == ".ci/ci.yml" -> 1
+        path.endsWith("/ci.yml") || path == "ci.yml" -> 2
+        else -> 99
     }
 }

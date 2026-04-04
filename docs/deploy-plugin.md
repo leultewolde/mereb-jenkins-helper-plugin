@@ -28,6 +28,14 @@ https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/
 
 Every published plugin version is driven by pushes to `main`.
 
+The plugin ID is now:
+
+```text
+org.mereb.jenkins.helper
+```
+
+This replaced the older ID `org.mereb.intellij.mjc`. Because IntelliJ keys updates by plugin ID, users on the old ID will need one manual uninstall/reinstall when this change is rolled out.
+
 1. Commit plugin source/config changes.
 2. The pre-commit hook bumps `build.gradle.kts` when the current version has already been released.
 3. Push to `main`.
@@ -77,6 +85,14 @@ Check:
 
 Users install the plugin by adding the repository URL once in IntelliJ:
 
+If the user already has an older build installed under plugin ID `org.mereb.intellij.mjc`, they must first:
+
+1. Uninstall the old plugin.
+2. Restart IntelliJ if prompted.
+3. Install the current plugin from the custom repository.
+
+This one-time reinstall is required because IntelliJ treats the new plugin ID as a different plugin.
+
 1. Open IntelliJ IDEA.
 2. Go to `Settings` / `Preferences` -> `Plugins`.
 3. Click the gear icon.
@@ -86,6 +102,16 @@ Users install the plugin by adding the repository URL once in IntelliJ:
 6. Search for `Mereb Jenkins Helper` in the Plugins UI and install it.
 
 After that, IntelliJ checks the same repository URL for updates.
+
+After the plugin is installed and a project containing a Mereb config is opened, the plugin shows a one-time onboarding notification for that project and plugin version. The notification links to:
+
+- the built-in `How To Use` guide
+- the `Mereb Jenkins` tool window
+
+The same guide is also available from:
+
+- `Tools -> How To Use Mereb Jenkins Helper`
+- `Help -> How To Use Mereb Jenkins Helper`
 
 ## Signing And Trust Warning
 

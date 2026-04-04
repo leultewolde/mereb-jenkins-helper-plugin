@@ -15,6 +15,7 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 - Adds snippet completions for common blocks such as service starters, image blocks, deploy environments, microfrontend environments, and `release.autoTag`.
 - Adds inline documentation for important keys like `recipe`, `delivery.mode`, `release.autoTag.bump`, `deploy.*`, `microfrontend.*`, and `terraform.*`.
 - Adds relation-aware editor coloring for linked order entries, unused environment blocks, inactive sections, and ignored runtime keys.
+- Suppresses unrelated inspection-based lint on supported Mereb config files, including tools like SonarLint, so Mereb-aware checks remain the primary source of feedback.
 - Adds a `Mereb Jenkins` tool window with:
   - `Overview`: recipe, capabilities, notices, safe fixes, and section state
   - `Flow`: derived pipeline stage sequence
@@ -26,11 +27,17 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 
 ## Using The Plugin
 
-- Open `.ci/ci.mjc`, `.ci/ci.yml`, or `ci.yml` to get schema validation plus Mereb-specific semantic checks.
+- Open a project that contains a Mereb config plus its sibling `Jenkinsfile`.
+- Prefer `.ci/ci.mjc`; legacy `.ci/ci.yml` and `ci.yml` still work.
+- Open the `Mereb Jenkins` tool window to inspect the detected project context, derived flow, relations, warnings, and safe fixes.
+- If a workspace contains multiple Mereb projects, use the tool window `Project` selector to choose which one to focus on.
+- Use normal IntelliJ quick fixes, hover docs, and guided completion inside supported config files to apply repairs and inspect runtime notes without leaving the editor.
+- Third-party inspection-based lint is intentionally suppressed for supported Mereb config files. YAML parse errors, bundled schema validation, and Mereb-specific checks still remain.
 - Use `Tools -> New Mereb Jenkins Config` to scaffold a new recipe-aware config in the current project.
-- Use `Tools -> Migrate Mereb Jenkins Config` from an open config file to preview a conservative migration to `.ci/ci.mjc`.
-- Open the `Mereb Jenkins` tool window to inspect the effective recipe, capabilities, relations, derived flow, and upstream schema freshness.
-- Use normal IntelliJ quick fixes and hover docs inside supported config files to apply repairs and inspect runtime notes without leaving the editor.
+- Use `Tools -> Migrate Mereb Jenkins Config` to preview a conservative migration to `.ci/ci.mjc`.
+- Use `Tools -> How To Use Mereb Jenkins Helper` or `Help -> How To Use Mereb Jenkins Helper` to reopen the built-in guide at any time.
+
+See the full usage guide in [`docs/how-to-use-plugin.md`](docs/how-to-use-plugin.md).
 
 ## Local Build
 
@@ -56,6 +63,14 @@ That writes these files to `build/custom-plugin-repository/`:
 
 Use a custom plugin repository instead of `Install Plugin from Disk`.
 
+Important: the plugin ID was renamed from `org.mereb.intellij.mjc` to `org.mereb.jenkins.helper`.
+If you already installed an older build, IntelliJ will treat this as a different plugin. You need one manual cleanup:
+
+1. Uninstall the old `Mereb Jenkins Helper` plugin.
+2. Install the current plugin again from the custom repository.
+
+After that one-time reinstall, normal repository-based updates work again.
+
 1. Open IntelliJ IDEA.
 2. Go to `Settings` / `Preferences` -> `Plugins`.
 3. Click the gear icon.
@@ -64,10 +79,12 @@ Use a custom plugin repository instead of `Install Plugin from Disk`.
    `https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/updatePlugins.xml`
 6. Search for `Mereb Jenkins Helper` in the Plugins UI and install it.
 
-After that one-time setup, IntelliJ will check the same repository URL for updates.
+After the reinstall above, IntelliJ will check the same repository URL for updates normally.
 
 The initial rollout is unsigned. IntelliJ may show a trust warning during install or update.
 The GitHub Pages root URL also serves a small landing page that links to the repository feed and current ZIP.
+
+When the plugin first detects a Mereb project in IntelliJ, it also shows a one-time onboarding notification with actions to open the guide and the tool window.
 
 ## Development
 

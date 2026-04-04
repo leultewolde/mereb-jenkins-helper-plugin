@@ -8,8 +8,8 @@ object MerebJenkinsAnalysisCache {
     private val analyzer = MerebJenkinsConfigAnalyzer()
 
     fun forFile(file: PsiFile): MerebJenkinsAnalysisResult {
-        val virtualFile = file.virtualFile
-        if (virtualFile == null || !MerebJenkinsConfigPaths.isSchemaTarget(virtualFile)) {
+        val virtualFile = file.virtualFile ?: file.viewProvider.virtualFile
+        if (virtualFile == null || !MerebJenkinsConfigPaths.isSchemaTargetPath(virtualFile.path)) {
             return analyzer.analyzeDetailed(file.text)
         }
 
