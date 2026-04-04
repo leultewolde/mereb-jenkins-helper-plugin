@@ -69,6 +69,67 @@ data class MerebJenkinsConsoleExcerpt(
     val logUrl: String,
 )
 
+data class MerebJenkinsFailedTest(
+    val suiteName: String,
+    val caseName: String,
+    val status: String,
+    val className: String? = null,
+    val durationSeconds: Double? = null,
+    val errorDetails: String? = null,
+) {
+    override fun toString(): String = "$suiteName :: $caseName"
+}
+
+data class MerebJenkinsTestSummary(
+    val totalCount: Int = 0,
+    val failedCount: Int = 0,
+    val skippedCount: Int = 0,
+    val passedCount: Int = 0,
+    val durationSeconds: Double? = null,
+    val reportUrl: String? = null,
+    val failedTests: List<MerebJenkinsFailedTest> = emptyList(),
+)
+
+data class MerebJenkinsStageTrend(
+    val stageName: String,
+    val appearanceCount: Int,
+    val successCount: Int,
+    val failureCount: Int,
+    val unstableCount: Int,
+    val averageDurationMillis: Long? = null,
+    val lastFailureRunName: String? = null,
+    val lastFailureTimestampMillis: Long? = null,
+) {
+    val flaky: Boolean
+        get() = successCount > 0 && (failureCount > 0 || unstableCount > 0)
+}
+
+data class MerebJenkinsTrendSummary(
+    val sampleSize: Int = 0,
+    val flakyStageCount: Int = 0,
+    val stages: List<MerebJenkinsStageTrend> = emptyList(),
+)
+
+data class MerebJenkinsActionAvailability(
+    val canRebuild: Boolean = false,
+    val rebuildUrl: String? = null,
+    val rebuildDetail: String? = null,
+    val approvalUrl: String? = null,
+    val approvalDetail: String? = null,
+    val failingLogUrl: String? = null,
+    val failingLogDetail: String? = null,
+)
+
+data class MerebJenkinsOpsSnapshot(
+    val headline: String,
+    val buildStatus: String,
+    val selectedVariantLabel: String,
+    val pendingApprovalCount: Int,
+    val artifactCount: Int,
+    val flakyStageCount: Int,
+    val testHeadline: String,
+)
+
 data class MerebJenkinsRunChoice(
     val id: String? = null,
     val label: String = "Latest",

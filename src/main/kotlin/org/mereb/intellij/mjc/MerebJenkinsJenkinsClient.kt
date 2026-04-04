@@ -11,6 +11,7 @@ import java.net.http.HttpResponse
 import java.net.http.HttpTimeoutException
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.Path
 import java.time.Duration
 import java.util.Base64
 import java.util.concurrent.CompletableFuture
@@ -48,11 +49,14 @@ data class MerebJenkinsJobCandidateMatch(
 data class MerebJenkinsArtifactLink(
     val label: String,
     val url: String,
+    val relativePath: String? = null,
 )
 
 data class MerebJenkinsPendingInput(
     val id: String,
     val message: String,
+    val proceedUrl: String? = null,
+    val abortUrl: String? = null,
 )
 
 data class MerebJenkinsStage(
@@ -91,6 +95,8 @@ data class MerebJenkinsJobSummary(
     val lastBuildUrl: String? = null,
     val lastSuccessfulBuildNumber: Int? = null,
     val lastSuccessfulBuildUrl: String? = null,
+    val parameterized: Boolean = false,
+    val parameterNames: List<String> = emptyList(),
 )
 
 data class MerebJenkinsLiveJobData(
@@ -100,7 +106,17 @@ data class MerebJenkinsLiveJobData(
     val selectedRun: MerebJenkinsRun? = null,
     val pendingInputs: List<MerebJenkinsPendingInput> = emptyList(),
     val artifacts: List<MerebJenkinsArtifactLink> = emptyList(),
+    val testSummary: MerebJenkinsTestSummary? = null,
+    val trendSummary: MerebJenkinsTrendSummary = MerebJenkinsTrendSummary(),
+    val actionAvailability: MerebJenkinsActionAvailability = MerebJenkinsActionAvailability(),
+    val opsSnapshot: MerebJenkinsOpsSnapshot? = null,
     val refreshedAt: Long = System.currentTimeMillis(),
+)
+
+data class MerebJenkinsActionResult(
+    val success: Boolean,
+    val message: String,
+    val openedUrl: String? = null,
 )
 
 data class MerebJenkinsHttpResponse(
@@ -112,6 +128,10 @@ data class MerebJenkinsHttpResponse(
 
 fun interface MerebJenkinsHttpTransport {
     fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse
+
+    fun post(url: String, headers: Map<String, String>, body: String? = null): MerebJenkinsHttpResponse {
+        throw UnsupportedOperationException("POST is not supported by this transport")
+    }
 }
 
 class MerebJenkinsJdkHttpTransport(
@@ -124,9 +144,24 @@ class MerebJenkinsJdkHttpTransport(
         .build()
 
     override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+        return request("GET", url, headers, null)
+    }
+
+    override fun post(url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
+        return request("POST", url, headers, body)
+    }
+
+    private fun request(method: String, url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
         val builder = HttpRequest.newBuilder(URI.create(url))
             .timeout(requestTimeout)
-            .GET()
+            .method(
+                method,
+                when {
+                    method == "POST" && body != null -> HttpRequest.BodyPublishers.ofString(body)
+                    method == "POST" -> HttpRequest.BodyPublishers.noBody()
+                    else -> HttpRequest.BodyPublishers.noBody()
+                }
+            )
         headers.forEach { (name, value) -> builder.header(name, value) }
         val response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString())
         return MerebJenkinsHttpResponse(
@@ -143,6 +178,14 @@ class MerebJenkinsCurlHttpTransport(
     private val requestTimeoutSeconds: Long = 10,
 ) : MerebJenkinsHttpTransport {
     override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+        return request(method = "GET", url = url, headers = headers, body = null)
+    }
+
+    override fun post(url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
+        return request(method = "POST", url = url, headers = headers, body = body)
+    }
+
+    private fun request(method: String, url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
         val headersFile = Files.createTempFile("mereb-jenkins-curl-headers", ".txt")
         val bodyFile = Files.createTempFile("mereb-jenkins-curl-body", ".txt")
         try {
@@ -159,6 +202,13 @@ class MerebJenkinsCurlHttpTransport(
                 appendLine("dump-header = \"${headersFile.toAbsolutePath()}\"")
                 appendLine("output = \"${bodyFile.toAbsolutePath()}\"")
                 appendLine("write-out = \"%{http_code}\\n%{url_effective}\"")
+                if (method == "POST") {
+                    appendLine("request = \"POST\"")
+                    when {
+                        body != null -> appendLine("data = \"${escapeCurlConfigValue(body)}\"")
+                        else -> appendLine("data = \"\"")
+                    }
+                }
                 headers.forEach { (name, value) ->
                     appendLine("header = \"$name: ${escapeCurlConfigValue(value)}\"")
                 }
@@ -243,6 +293,12 @@ class MerebJenkinsFallbackHttpTransport(
         return runCatching { fallback.get(url, headers) }.getOrDefault(primaryResponse)
     }
 
+    override fun post(url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
+        val primaryResponse = primary.post(url, headers, body)
+        if (!shouldRetryWithFallback(primaryResponse)) return primaryResponse
+        return runCatching { fallback.post(url, headers, body) }.getOrDefault(primaryResponse)
+    }
+
     private fun shouldRetryWithFallback(response: MerebJenkinsHttpResponse): Boolean {
         return responseLooksEdgeFiltered(response)
     }
@@ -254,10 +310,18 @@ class MerebJenkinsRetryingHttpTransport(
     private val retryDelayMillis: Long = 150,
 ) : MerebJenkinsHttpTransport {
     override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+        return request { delegate.get(url, headers) }
+    }
+
+    override fun post(url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
+        return request { delegate.post(url, headers, body) }
+    }
+
+    private fun request(block: () -> MerebJenkinsHttpResponse): MerebJenkinsHttpResponse {
         var attempt = 0
         while (true) {
             try {
-                return delegate.get(url, headers)
+                return block()
             } catch (error: Exception) {
                 if (attempt >= maxRetries || !shouldRetry(error)) {
                     throw error
@@ -372,8 +436,18 @@ class MerebJenkinsJenkinsClient(
             staleOnKinds = CACHEABLE_TRANSIENT_FAILURES,
         ) {
             requestMap(
-                "${normalizedBaseUrl}$path/api/json?tree=name,fullName,url,color,_class,buildable,inQueue,jobs[name],queueItem[why,stuck,blocked,id],lastBuild[number,url,building,result,duration,timestamp],lastSuccessfulBuild[number,url,result,duration,timestamp]"
+                "${normalizedBaseUrl}$path/api/json?tree=name,fullName,url,color,_class,buildable,inQueue,jobs[name],queueItem[why,stuck,blocked,id],property[_class,parameterDefinitions[name]],lastBuild[number,url,building,result,duration,timestamp],lastSuccessfulBuild[number,url,result,duration,timestamp]"
             ).mapSuccess { body ->
+                val parameterNames = body.list("property")
+                    .mapNotNull { property ->
+                        val map = property as? Map<*, *> ?: return@mapNotNull null
+                        if (!map.string("_class").orEmpty().contains("ParametersDefinitionProperty")) return@mapNotNull null
+                        map.list("parameterDefinitions").mapNotNull { definition ->
+                            (definition as? Map<*, *>)?.string("name")
+                        }
+                    }
+                    .flatten()
+                    .distinct()
                 MerebJenkinsJobSummary(
                     jobPath = MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath),
                     name = body.string("name").orEmpty(),
@@ -397,6 +471,8 @@ class MerebJenkinsJenkinsClient(
                     lastBuildUrl = absoluteBuildUrl(jobPath, body.map("lastBuild")?.int("number"), body.map("lastBuild")?.string("url")),
                     lastSuccessfulBuildNumber = body.map("lastSuccessfulBuild")?.int("number"),
                     lastSuccessfulBuildUrl = absoluteBuildUrl(jobPath, body.map("lastSuccessfulBuild")?.int("number"), body.map("lastSuccessfulBuild")?.string("url")),
+                    parameterized = parameterNames.isNotEmpty(),
+                    parameterNames = parameterNames,
                 )
             }
         }
@@ -480,9 +556,14 @@ class MerebJenkinsJenkinsClient(
                 val describedRunFuture = selectedRun?.let { run -> asyncRequest { fetchRunDescribe(jobPath, run.id) } }
                 val pendingInputsFuture = selectedRun?.let { run -> asyncRequest { fetchPendingInputs(jobPath, run.id) } }
                 val artifactsFuture = selectedRun?.let { run -> asyncRequest { fetchArtifacts(jobPath, run.id) } }
+                val testsFuture = selectedRun?.let { run -> asyncRequest { fetchTestSummary(jobPath, run.id) } }
                 val describedRun = describedRunFuture?.join() ?: selectedRun
                 val pendingInputs = pendingInputsFuture?.join() ?: emptyList()
                 val artifacts = artifactsFuture?.join() ?: emptyList()
+                val testSummary = testsFuture?.join()
+                val trendSummary = buildTrendSummary(runs.take(TREND_SAMPLE_LIMIT))
+                val actionAvailability = buildActionAvailability(jobPath, summary, describedRun, pendingInputs, testSummary)
+                val opsSnapshot = buildOpsSnapshot(variantLabel = summary.displayName, selectedRun = describedRun, pendingInputs = pendingInputs, artifacts = artifacts, testSummary = testSummary, trendSummary = trendSummary)
 
                 MerebJenkinsApiResult.Success(
                     MerebJenkinsLiveJobData(
@@ -492,9 +573,55 @@ class MerebJenkinsJenkinsClient(
                         selectedRun = describedRun,
                         pendingInputs = pendingInputs,
                         artifacts = artifacts,
+                        testSummary = testSummary,
+                        trendSummary = trendSummary,
+                        actionAvailability = actionAvailability,
+                        opsSnapshot = opsSnapshot,
                     )
                 )
             }
+        }
+    }
+
+    fun triggerRebuild(jobPath: String, summary: MerebJenkinsJobSummary? = null): MerebJenkinsApiResult<MerebJenkinsActionResult> {
+        val jobSummary = summary ?: when (val result = fetchJobSummary(jobPath)) {
+            is MerebJenkinsApiResult.Success -> result.value
+            is MerebJenkinsApiResult.Failure -> return result
+        }
+        val fallbackUrl = jobSummary.url.ifBlank { buildJobUrl(jobPath) }
+        if (!jobSummary.buildable || jobSummary.jobClass?.contains("WorkflowMultiBranchProject") == true) {
+            return MerebJenkinsApiResult.Success(
+                MerebJenkinsActionResult(
+                    success = false,
+                    message = "This Jenkins job is not directly buildable from the plugin.",
+                    openedUrl = fallbackUrl,
+                )
+            )
+        }
+        if (jobSummary.parameterized) {
+            return MerebJenkinsApiResult.Success(
+                MerebJenkinsActionResult(
+                    success = false,
+                    message = "This Jenkins job is parameterized. Open Jenkins to rebuild it with parameters.",
+                    openedUrl = fallbackUrl,
+                )
+            )
+        }
+        val requestUrl = "${fallbackUrl.trimEnd('/')}/build"
+        return requestPost(requestUrl).mapSuccess {
+            MerebJenkinsActionResult(
+                success = true,
+                message = "Triggered Jenkins rebuild for ${jobSummary.displayName}.",
+                openedUrl = jobSummary.lastBuildUrl ?: fallbackUrl,
+            )
+        }
+    }
+
+    fun downloadArtifact(artifact: MerebJenkinsArtifactLink, destination: Path): MerebJenkinsApiResult<Path> {
+        return if (MerebJenkinsCurlHttpTransport.isAvailable()) {
+            downloadArtifactWithCurl(artifact.url, destination)
+        } else {
+            downloadArtifactWithJdk(artifact.url, destination)
         }
     }
 
@@ -542,9 +669,13 @@ class MerebJenkinsJenkinsClient(
         return when (val result = requestList("${normalizedBaseUrl}${encodeJobPath(jobPath)}/${encodeSegment(runId)}/wfapi/pendingInputActions")) {
             is MerebJenkinsApiResult.Success -> result.value.mapNotNull { payload ->
                 val map = payload as? Map<*, *> ?: return@mapNotNull null
+                val proceedUrl = absoluteUrl(map.string("proceedUrl")) ?: absoluteUrl(map.string("url"))
+                val abortUrl = absoluteUrl(map.string("abortUrl"))
                 MerebJenkinsPendingInput(
                     id = map.string("id") ?: map.string("proceedUrl") ?: return@mapNotNull null,
                     message = map.string("message") ?: map.string("caption") ?: "Pending input",
+                    proceedUrl = proceedUrl,
+                    abortUrl = abortUrl,
                 )
             }
             is MerebJenkinsApiResult.Failure -> emptyList()
@@ -563,11 +694,141 @@ class MerebJenkinsJenkinsClient(
                         MerebJenkinsArtifactLink(
                             label = label,
                             url = buildUrl + "artifact/" + relativePath,
+                            relativePath = relativePath,
                         )
                     }
             }
             is MerebJenkinsApiResult.Failure -> emptyList()
         }
+    }
+
+    private fun fetchTestSummary(jobPath: String, runId: String): MerebJenkinsTestSummary? {
+        return when (val result = requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/${encodeSegment(runId)}/testReport/api/json?tree=passCount,failCount,skipCount,duration,suites[name,cases[name,status,className,duration,errorDetails,errorStackTrace]]")) {
+            is MerebJenkinsApiResult.Success -> {
+                val passCount = result.value.int("passCount") ?: 0
+                val failCount = result.value.int("failCount") ?: 0
+                val skipCount = result.value.int("skipCount") ?: 0
+                val failedTests = result.value.list("suites").flatMap { suitePayload ->
+                    val suite = suitePayload as? Map<*, *> ?: return@flatMap emptyList()
+                    val suiteName = suite.string("name") ?: "Suite"
+                    suite.list("cases").mapNotNull { casePayload ->
+                        val caseMap = casePayload as? Map<*, *> ?: return@mapNotNull null
+                        val status = caseMap.string("status").orEmpty()
+                        if (!status.contains("FAIL", ignoreCase = true) && !status.contains("REGRESSION", ignoreCase = true)) {
+                            return@mapNotNull null
+                        }
+                        MerebJenkinsFailedTest(
+                            suiteName = suiteName,
+                            caseName = caseMap.string("name") ?: "test case",
+                            status = status,
+                            className = caseMap.string("className"),
+                            durationSeconds = caseMap.long("duration")?.toDouble(),
+                            errorDetails = caseMap.string("errorDetails") ?: caseMap.string("errorStackTrace"),
+                        )
+                    }
+                }.take(MAX_FAILED_TESTS)
+                MerebJenkinsTestSummary(
+                    totalCount = passCount + failCount + skipCount,
+                    failedCount = failCount,
+                    skippedCount = skipCount,
+                    passedCount = passCount,
+                    durationSeconds = result.value.long("duration")?.toDouble(),
+                    reportUrl = "${absoluteBuildUrl(jobPath, runId.toIntOrNull(), null)}testReport/",
+                    failedTests = failedTests,
+                )
+            }
+            is MerebJenkinsApiResult.Failure -> null
+        }
+    }
+
+    private fun buildTrendSummary(runs: List<MerebJenkinsRun>): MerebJenkinsTrendSummary {
+        if (runs.isEmpty()) return MerebJenkinsTrendSummary()
+        val byStage = linkedMapOf<String, MutableList<Pair<MerebJenkinsRun, MerebJenkinsStage>>>()
+        runs.forEach { run ->
+            run.stages.forEach { stage ->
+                val key = normalizeTrendStage(stage.name)
+                byStage.getOrPut(key) { mutableListOf() } += run to stage
+            }
+        }
+        val trends = byStage.values.map { entries ->
+            val representative = entries.first().second.name
+            val successCount = entries.count { isSuccessfulStage(it.second.status) }
+            val failureEntries = entries.filter { isFailingStage(it.second.status) }
+            val unstableCount = entries.count { isUnstableStage(it.second.status) }
+            val durations = entries.mapNotNull { it.second.durationMillis }
+            MerebJenkinsStageTrend(
+                stageName = representative,
+                appearanceCount = entries.size,
+                successCount = successCount,
+                failureCount = failureEntries.size,
+                unstableCount = unstableCount,
+                averageDurationMillis = durations.takeIf { it.isNotEmpty() }?.average()?.toLong(),
+                lastFailureRunName = failureEntries.firstOrNull()?.first?.name,
+                lastFailureTimestampMillis = failureEntries.firstOrNull()?.first?.timestampMillis,
+            )
+        }.sortedWith(
+            compareByDescending<MerebJenkinsStageTrend> { it.failureCount + it.unstableCount }
+                .thenByDescending { if (it.flaky) 1 else 0 }
+                .thenBy { it.stageName.lowercase() }
+        )
+        return MerebJenkinsTrendSummary(
+            sampleSize = runs.size,
+            flakyStageCount = trends.count { it.flaky },
+            stages = trends,
+        )
+    }
+
+    private fun buildActionAvailability(
+        jobPath: String,
+        summary: MerebJenkinsJobSummary,
+        selectedRun: MerebJenkinsRun?,
+        pendingInputs: List<MerebJenkinsPendingInput>,
+        testSummary: MerebJenkinsTestSummary?,
+    ): MerebJenkinsActionAvailability {
+        val fallbackRunLogUrl = selectedRun?.url?.let { "${it.trimEnd('/')}/console" }
+        val approvalUrl = pendingInputs.firstOrNull()?.proceedUrl ?: selectedRun?.url
+        val failingLogUrl = fallbackRunLogUrl
+        return MerebJenkinsActionAvailability(
+            canRebuild = summary.buildable && !summary.parameterized && !(summary.jobClass?.contains("WorkflowMultiBranchProject") == true),
+            rebuildUrl = "${summary.url.trimEnd('/')}/build",
+            rebuildDetail = when {
+                !summary.buildable -> "This Jenkins job is not buildable."
+                summary.jobClass?.contains("WorkflowMultiBranchProject") == true -> "Select a concrete branch job before rebuilding."
+                summary.parameterized -> "This Jenkins job requires parameters and must be rebuilt from Jenkins."
+                else -> "Trigger a new Jenkins build for ${summary.displayName}."
+            },
+            approvalUrl = approvalUrl,
+            approvalDetail = pendingInputs.firstOrNull()?.message ?: "No pending approval input.",
+            failingLogUrl = failingLogUrl ?: testSummary?.reportUrl,
+            failingLogDetail = selectedRun?.stages?.firstOrNull { isFailingStage(it.status) }?.name
+                ?.let { "Open the log for failing stage $it." }
+                ?: "Open the selected Jenkins build log.",
+        )
+    }
+
+    private fun buildOpsSnapshot(
+        variantLabel: String,
+        selectedRun: MerebJenkinsRun?,
+        pendingInputs: List<MerebJenkinsPendingInput>,
+        artifacts: List<MerebJenkinsArtifactLink>,
+        testSummary: MerebJenkinsTestSummary?,
+        trendSummary: MerebJenkinsTrendSummary,
+    ): MerebJenkinsOpsSnapshot {
+        val buildStatus = selectedRun?.status ?: "No run"
+        val testHeadline = when {
+            testSummary == null -> "No test report"
+            testSummary.failedCount > 0 -> "${testSummary.failedCount} failed / ${testSummary.totalCount} total"
+            else -> "${testSummary.totalCount} passed"
+        }
+        return MerebJenkinsOpsSnapshot(
+            headline = selectedRun?.name ?: variantLabel,
+            buildStatus = buildStatus,
+            selectedVariantLabel = variantLabel,
+            pendingApprovalCount = pendingInputs.size,
+            artifactCount = artifacts.size,
+            flakyStageCount = trendSummary.flakyStageCount,
+            testHeadline = testHeadline,
+        )
     }
 
     private fun collectVisibleJobs(
@@ -705,6 +966,198 @@ class MerebJenkinsJenkinsClient(
                     else -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNKNOWN, message = error.message, requestUrl = url)
                 }
             )
+        }
+    }
+
+    private fun requestPost(url: String, body: String? = null): MerebJenkinsApiResult<Unit> {
+        return try {
+            val response = transport.post(url, headers() + mapOf("Content-Type" to "application/x-www-form-urlencoded"), body)
+            classifyEdgeFilter(response, url)?.let { problem ->
+                return MerebJenkinsApiResult.Failure(problem)
+            }
+            when (response.statusCode) {
+                HttpURLConnection.HTTP_OK,
+                HttpURLConnection.HTTP_CREATED,
+                HttpURLConnection.HTTP_ACCEPTED,
+                HttpURLConnection.HTTP_NO_CONTENT,
+                HttpURLConnection.HTTP_MOVED_TEMP -> MerebJenkinsApiResult.Success(Unit)
+                HttpURLConnection.HTTP_UNAUTHORIZED,
+                HttpURLConnection.HTTP_FORBIDDEN -> MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.AUTH,
+                        statusCode = response.statusCode,
+                        message = "Jenkins rejected the rebuild request.",
+                        requestUrl = url,
+                    )
+                )
+                else -> MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                        statusCode = response.statusCode,
+                        message = "Jenkins returned HTTP ${response.statusCode} while triggering a rebuild.",
+                        requestUrl = url,
+                    )
+                )
+            }
+        } catch (error: Exception) {
+            MerebJenkinsApiResult.Failure(
+                when (error) {
+                    is HttpTimeoutException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.TIMEOUT, message = "Timed out while triggering the Jenkins rebuild.", requestUrl = url)
+                    is ConnectException, is UnknownHostException, is SSLException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNREACHABLE, message = error.message, requestUrl = url)
+                    else -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNKNOWN, message = error.message, requestUrl = url)
+                }
+            )
+        }
+    }
+
+    private fun downloadArtifactWithJdk(url: String, destination: Path): MerebJenkinsApiResult<Path> {
+        return try {
+            Files.createDirectories(destination.parent ?: destination.toAbsolutePath().parent)
+            val builder = HttpRequest.newBuilder(URI.create(url))
+                .timeout(Duration.ofSeconds(20))
+                .GET()
+            headers().forEach { (name, value) -> builder.header(name, value) }
+            val client = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(5))
+                .followRedirects(HttpClient.Redirect.NEVER)
+                .build()
+            val response = client.send(builder.build(), HttpResponse.BodyHandlers.ofFile(destination))
+            when (response.statusCode()) {
+                HttpURLConnection.HTTP_OK -> MerebJenkinsApiResult.Success(destination)
+                HttpURLConnection.HTTP_MOVED_PERM,
+                HttpURLConnection.HTTP_MOVED_TEMP,
+                HttpURLConnection.HTTP_SEE_OTHER,
+                307,
+                308 -> {
+                    Files.deleteIfExists(destination)
+                    MerebJenkinsApiResult.Failure(
+                        MerebJenkinsApiProblem(
+                            kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                            statusCode = response.statusCode(),
+                            message = "Jenkins redirected the artifact download. Open the artifact in Jenkins instead.",
+                            requestUrl = url,
+                            redirectTarget = response.headers().firstValue("location").orElse(null),
+                        )
+                    )
+                }
+                HttpURLConnection.HTTP_UNAUTHORIZED,
+                HttpURLConnection.HTTP_FORBIDDEN -> {
+                    Files.deleteIfExists(destination)
+                    MerebJenkinsApiResult.Failure(
+                        MerebJenkinsApiProblem(
+                            kind = MerebJenkinsApiProblemKind.AUTH,
+                            statusCode = response.statusCode(),
+                            message = "Jenkins rejected the artifact download request.",
+                            requestUrl = url,
+                        )
+                    )
+                }
+                else -> {
+                    Files.deleteIfExists(destination)
+                    MerebJenkinsApiResult.Failure(
+                        MerebJenkinsApiProblem(
+                            kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                            statusCode = response.statusCode(),
+                            message = "Jenkins returned HTTP ${response.statusCode()} while downloading the artifact.",
+                            requestUrl = url,
+                        )
+                    )
+                }
+            }
+        } catch (error: Exception) {
+            runCatching { Files.deleteIfExists(destination) }
+            MerebJenkinsApiResult.Failure(
+                when (error) {
+                    is HttpTimeoutException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.TIMEOUT, message = "Timed out while downloading the Jenkins artifact.", requestUrl = url)
+                    is ConnectException, is UnknownHostException, is SSLException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNREACHABLE, message = error.message, requestUrl = url)
+                    else -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNKNOWN, message = error.message ?: "Unable to save Jenkins artifact.", requestUrl = url)
+                }
+            )
+        }
+    }
+
+    private fun downloadArtifactWithCurl(url: String, destination: Path): MerebJenkinsApiResult<Path> {
+        val headersFile = Files.createTempFile("mereb-jenkins-artifact-headers", ".txt")
+        try {
+            Files.createDirectories(destination.parent ?: destination.toAbsolutePath().parent)
+            val process = ProcessBuilder("curl", "--config", "-")
+                .redirectErrorStream(true)
+                .start()
+            val config = buildString {
+                appendLine("url = \"$url\"")
+                appendLine("silent")
+                appendLine("show-error")
+                appendLine("connect-timeout = 5")
+                appendLine("max-time = 30")
+                appendLine("dump-header = \"${headersFile.toAbsolutePath()}\"")
+                appendLine("output = \"${destination.toAbsolutePath()}\"")
+                appendLine("write-out = \"%{http_code}\\n%{url_effective}\"")
+                headers().forEach { (name, value) ->
+                    appendLine("header = \"$name: ${value.replace("\\", "\\\\").replace("\"", "\\\"")}\"")
+                }
+            }
+            process.outputStream.bufferedWriter().use { writer -> writer.write(config) }
+            if (!process.waitFor(32, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                runCatching { Files.deleteIfExists(destination) }
+                return MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.TIMEOUT,
+                        message = "Timed out while downloading the Jenkins artifact.",
+                        requestUrl = url,
+                    )
+                )
+            }
+            val writeOut = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            val lines = writeOut.lines().filter { it.isNotBlank() }
+            val statusCode = lines.firstOrNull()?.toIntOrNull()
+            if (process.exitValue() != 0 || statusCode == null) {
+                runCatching { Files.deleteIfExists(destination) }
+                return MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                        message = writeOut.ifBlank { "curl failed while downloading the Jenkins artifact." },
+                        requestUrl = url,
+                    )
+                )
+            }
+            return when (statusCode) {
+                HttpURLConnection.HTTP_OK -> MerebJenkinsApiResult.Success(destination)
+                HttpURLConnection.HTTP_UNAUTHORIZED,
+                HttpURLConnection.HTTP_FORBIDDEN -> {
+                    runCatching { Files.deleteIfExists(destination) }
+                    MerebJenkinsApiResult.Failure(
+                        MerebJenkinsApiProblem(
+                            kind = MerebJenkinsApiProblemKind.AUTH,
+                            statusCode = statusCode,
+                            message = "Jenkins rejected the artifact download request.",
+                            requestUrl = url,
+                        )
+                    )
+                }
+                else -> {
+                    runCatching { Files.deleteIfExists(destination) }
+                    MerebJenkinsApiResult.Failure(
+                        MerebJenkinsApiProblem(
+                            kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                            statusCode = statusCode,
+                            message = "Jenkins returned HTTP $statusCode while downloading the artifact.",
+                            requestUrl = url,
+                        )
+                    )
+                }
+            }
+        } catch (error: Exception) {
+            runCatching { Files.deleteIfExists(destination) }
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                    message = error.message ?: "Unable to save Jenkins artifact.",
+                    requestUrl = url,
+                )
+            )
+        } finally {
+            Files.deleteIfExists(headersFile)
         }
     }
 
@@ -933,6 +1386,8 @@ class MerebJenkinsJenkinsClient(
         private const val JOB_FAMILY_CACHE_MS = 15_000L
         private const val JOB_SUMMARY_CACHE_MS = 8_000L
         private const val RUN_DETAIL_CACHE_MS = 8_000L
+        private const val TREND_SAMPLE_LIMIT = 20
+        private const val MAX_FAILED_TESTS = 10
         private val CACHEABLE_TRANSIENT_FAILURES = setOf(
             MerebJenkinsApiProblemKind.TIMEOUT,
             MerebJenkinsApiProblemKind.UNREACHABLE,
@@ -1087,6 +1542,21 @@ class MerebJenkinsJenkinsClient(
             }
             return lines.takeLast(80).joinToString("\n") to false
         }
+
+        private fun normalizeTrendStage(value: String): String {
+            return value.lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-')
+        }
+
+        private fun isSuccessfulStage(status: String?): Boolean = status.orEmpty().contains("SUCCESS", ignoreCase = true)
+
+        private fun isFailingStage(status: String?): Boolean {
+            val normalized = status.orEmpty()
+            return normalized.contains("FAIL", ignoreCase = true) ||
+                normalized.contains("ERROR", ignoreCase = true) ||
+                normalized.contains("ABORT", ignoreCase = true)
+        }
+
+        private fun isUnstableStage(status: String?): Boolean = status.orEmpty().contains("UNSTABLE", ignoreCase = true)
     }
 }
 

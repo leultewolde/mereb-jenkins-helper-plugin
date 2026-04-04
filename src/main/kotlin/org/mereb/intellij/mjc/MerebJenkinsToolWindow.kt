@@ -16,7 +16,9 @@ import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.util.Condition
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.IconLoader
@@ -43,6 +45,7 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
+import java.awt.datatransfer.StringSelection
 import java.awt.event.HierarchyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
@@ -54,6 +57,7 @@ import javax.swing.JCheckBox
 import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComponent
+import javax.swing.JFileChooser
 import javax.swing.JList
 import javax.swing.JPanel
 import javax.swing.JTextArea
@@ -130,7 +134,12 @@ private class MerebJenkinsToolWindowPanel(
     private val remapJobButton = JButton("Remap Job")
     private val refreshJenkinsButton = JButton("Refresh Live Data")
     private val openInJenkinsButton = JButton("Open in Jenkins")
-    private val openLogButton = JButton("Open Full Log")
+    private val openLogButton = JButton("Open Exact Failing Log")
+    private val openApprovalButton = JButton("Open Approval")
+    private val rebuildButton = JButton("Rebuild")
+    private val artifactOpenButton = JButton("Open Artifact")
+    private val artifactCopyLinkButton = JButton("Copy Artifact Link")
+    private val artifactDownloadButton = JButton("Download Artifact")
     private val compareModeToggle = JCheckBox("Compare to main")
 
     private val recipeCard = StatusCard("Recipe")
@@ -146,6 +155,10 @@ private class MerebJenkinsToolWindowPanel(
     private val jenkinsApprovalCard = StatusCard("Approval")
     private val jenkinsSuccessCard = StatusCard("Last Success")
     private val jenkinsCompareCard = StatusCard("Compare")
+    private val jenkinsTestCard = StatusCard("Tests")
+    private val jenkinsArtifactCard = StatusCard("Artifacts")
+    private val jenkinsTrendCard = StatusCard("Flaky Stages")
+    private val jenkinsOpsCard = StatusCard("Ops")
 
     private val findingsModel = DefaultListModel<MerebJenkinsFinding>()
     private val sectionsModel = DefaultListModel<MerebJenkinsSectionState>()
@@ -159,6 +172,8 @@ private class MerebJenkinsToolWindowPanel(
     private val compareStagesModel = DefaultListModel<MerebJenkinsStage>()
     private val driftModel = DefaultListModel<MerebJenkinsDriftFinding>()
     private val timelineModel = DefaultListModel<MerebJenkinsDeploymentTimelineEntry>()
+    private val jenkinsFailedTestsModel = DefaultListModel<MerebJenkinsFailedTest>()
+    private val jenkinsTrendModel = DefaultListModel<MerebJenkinsStageTrend>()
 
     private val findingsList = JBList(findingsModel)
     private val sectionsList = JBList(sectionsModel)
@@ -172,6 +187,8 @@ private class MerebJenkinsToolWindowPanel(
     private val compareStagesList = JBList(compareStagesModel)
     private val driftList = JBList(driftModel)
     private val timelineList = JBList(timelineModel)
+    private val jenkinsFailedTestsList = JBList(jenkinsFailedTestsModel)
+    private val jenkinsTrendList = JBList(jenkinsTrendModel)
 
     private val upstreamStateLabel = JBLabel("Schema status: idle")
     private val upstreamHashesLabel = JBLabel("Run a manual check to compare bundled and live schema hashes.")
@@ -206,6 +223,9 @@ private class MerebJenkinsToolWindowPanel(
         wrapStyleWord = true
         font = JBFont.small()
     }
+    private val testSummaryLabel = JBLabel("No JUnit summary for the selected run.")
+    private val compareTestSummaryLabel = JBLabel("Compare-side test summary is unavailable.")
+    private val trendSummaryLabel = JBLabel("Flaky/stage trend analysis is unavailable.")
 
     val component: JComponent
         get() = root
@@ -230,6 +250,11 @@ private class MerebJenkinsToolWindowPanel(
         refreshJenkinsButton.addActionListener { scheduleJenkinsRefresh(delayMs = 0, manual = true) }
         openInJenkinsButton.addActionListener { openInJenkins() }
         openLogButton.addActionListener { openSelectedLog() }
+        openApprovalButton.addActionListener { openApproval() }
+        rebuildButton.addActionListener { rebuildSelectedJob() }
+        artifactOpenButton.addActionListener { openSelectedArtifact() }
+        artifactCopyLinkButton.addActionListener { copySelectedArtifactLink() }
+        artifactDownloadButton.addActionListener { downloadSelectedArtifact() }
         targetSelector.addActionListener {
             if (updatingTargetSelector) return@addActionListener
             currentTarget = targetSelector.selectedItem as? MerebJenkinsWorkspaceTarget
@@ -364,7 +389,7 @@ private class MerebJenkinsToolWindowPanel(
     }
 
     private fun buildOverviewTab(): JComponent {
-        val cards = JPanel(GridLayout(3, 3, 10, 10)).apply {
+        val cards = JPanel(GridLayout(3, 4, 10, 10)).apply {
             add(recipeCard)
             add(imageCard)
             add(releaseCard)
@@ -374,6 +399,9 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsConnectionCard)
             add(jenkinsJobCard)
             add(jenkinsBuildCard)
+            add(jenkinsTestCard)
+            add(jenkinsTrendCard)
+            add(jenkinsOpsCard)
         }
 
         val findingsPanel = titledPanel("Findings", JBScrollPane(findingsList))
@@ -404,7 +432,7 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsErrorLabel)
             add(jenkinsDiagnosticsLabel)
         }
-        val cards = JPanel(GridLayout(2, 4, 10, 10)).apply {
+        val cards = JPanel(GridLayout(3, 4, 10, 10)).apply {
             add(jenkinsConnectionCard)
             add(jenkinsJobCard)
             add(jenkinsBuildCard)
@@ -412,7 +440,11 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsQueueCard)
             add(jenkinsApprovalCard)
             add(jenkinsSuccessCard)
-            add(StatusCard("Mode").also { it.update("Read-only", "Branch/run compare enabled in Release 1.", Tone.NEUTRAL) })
+            add(jenkinsTestCard)
+            add(jenkinsArtifactCard)
+            add(jenkinsTrendCard)
+            add(jenkinsOpsCard)
+            add(StatusCard("Mode").also { it.update("Read-only", "Compare, drift, tests, trends, and safe actions are enabled.", Tone.NEUTRAL) })
         }
         val primarySelectorRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(jenkinsVariantLabel)
@@ -442,16 +474,37 @@ private class MerebJenkinsToolWindowPanel(
             add(titledPanel("Stages", JBScrollPane(jenkinsStagesList)), BorderLayout.CENTER)
         }
         val comparePanel = JPanel(BorderLayout(0, 8)).apply {
-            add(titledPanel("Compare Runs", JBScrollPane(compareRunsList)), BorderLayout.NORTH)
+            add(JPanel(BorderLayout(0, 6)).apply {
+                add(compareTestSummaryLabel, BorderLayout.NORTH)
+                add(titledPanel("Compare Runs", JBScrollPane(compareRunsList)), BorderLayout.CENTER)
+            }, BorderLayout.NORTH)
             add(titledPanel("Compare Stages", JBScrollPane(compareStagesList)), BorderLayout.CENTER)
         }
         val livePanel = JPanel(GridLayout(1, 2, 10, 10)).apply {
             add(primaryPanel)
             add(comparePanel)
         }
-        val supportPanel = JPanel(GridLayout(2, 2, 10, 10)).apply {
+        val testPanel = JPanel(BorderLayout(0, 8)).apply {
+            add(testSummaryLabel, BorderLayout.NORTH)
+            add(JBScrollPane(jenkinsFailedTestsList), BorderLayout.CENTER)
+        }
+        val trendPanel = JPanel(BorderLayout(0, 8)).apply {
+            add(trendSummaryLabel, BorderLayout.NORTH)
+            add(JBScrollPane(jenkinsTrendList), BorderLayout.CENTER)
+        }
+        val artifactPanel = JPanel(BorderLayout(0, 8)).apply {
+            add(JBScrollPane(jenkinsArtifactsList), BorderLayout.CENTER)
+            add(JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+                add(artifactOpenButton)
+                add(artifactCopyLinkButton)
+                add(artifactDownloadButton)
+            }, BorderLayout.SOUTH)
+        }
+        val supportPanel = JPanel(GridLayout(3, 2, 10, 10)).apply {
             add(titledPanel("Pending Input", JBScrollPane(jenkinsPendingList)))
-            add(titledPanel("Artifacts", JBScrollPane(jenkinsArtifactsList)))
+            add(titledPanel("Artifacts", artifactPanel))
+            add(titledPanel("Test Summary", testPanel))
+            add(titledPanel("Flaky Stage Trends", trendPanel))
             add(titledPanel("Deployment Timeline", JBScrollPane(timelineList)))
             add(titledPanel("Drift Findings", JBScrollPane(driftList)))
         }
@@ -468,6 +521,8 @@ private class MerebJenkinsToolWindowPanel(
             add(connectJenkinsButton)
             add(remapJobButton)
             add(refreshJenkinsButton)
+            add(rebuildButton)
+            add(openApprovalButton)
             add(openLogButton)
             add(openInJenkinsButton)
         }
@@ -661,6 +716,39 @@ private class MerebJenkinsToolWindowPanel(
             ) {
                 if (value == null) return
                 append(value.label, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                value.relativePath?.takeIf { it.isNotBlank() }?.let {
+                    append("  $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+                }
+            }
+        }
+        jenkinsFailedTestsList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsFailedTest>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsFailedTest>,
+                value: MerebJenkinsFailedTest?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.caseName, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                append("  ${value.suiteName}", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                append("  ${value.status.lowercase()}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+        }
+        jenkinsTrendList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsStageTrend>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsStageTrend>,
+                value: MerebJenkinsStageTrend?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.stageName, if (value.flaky) SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES else SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                append(
+                    "  fail ${value.failureCount}/${value.appearanceCount}  unstable ${value.unstableCount}",
+                    if (value.flaky) SimpleTextAttributes.GRAYED_ATTRIBUTES else SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES,
+                )
             }
         }
         driftList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsDriftFinding>() {
@@ -734,11 +822,41 @@ private class MerebJenkinsToolWindowPanel(
             val artifact = jenkinsArtifactsList.selectedValue ?: return@doubleClickListener
             browseJenkinsUrl(artifact.url, "No Jenkins artifact URL is available for the selected artifact.")
         })
+        jenkinsPendingList.addMouseListener(doubleClickListener {
+            openApproval()
+        })
+        jenkinsFailedTestsList.addMouseListener(doubleClickListener {
+            openSelectedLog()
+        })
+        jenkinsTrendList.addMouseListener(doubleClickListener {
+            val trend = jenkinsTrendList.selectedValue ?: return@doubleClickListener
+            val stageIndex = currentLiveData?.selectedRun?.stages?.indexOfFirst {
+                it.name.equals(trend.stageName, ignoreCase = true)
+            } ?: -1
+            if (stageIndex >= 0) {
+                jenkinsStagesList.selectedIndex = stageIndex
+                loadConsoleExcerpt(primary = true)
+            } else {
+                openSelectedLog()
+            }
+        })
         driftList.addMouseListener(doubleClickListener {
             val finding = driftList.selectedValue ?: return@doubleClickListener
             currentAnalysis?.let { navigate(finding.path, it) }
             uiStateService.requestFocus(finding.path, "Jenkins")
         })
+        listOf(
+            jenkinsArtifactsList,
+            jenkinsPendingList,
+            jenkinsStagesList,
+            compareStagesList,
+            jenkinsRunsList,
+            compareRunsList,
+            jenkinsFailedTestsList,
+            jenkinsTrendList,
+        ).forEach { list ->
+            list.addListSelectionListener { updateButtons() }
+        }
     }
 
     private fun configureTargetSelector() {
@@ -1092,6 +1210,11 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsApprovalCard.update("None", "No live approval state.", Tone.NEUTRAL)
         jenkinsSuccessCard.update("None", "No recent successful build.", Tone.NEUTRAL)
         jenkinsCompareCard.update("Off", "Compare mode is disabled.", Tone.NEUTRAL)
+        jenkinsTestCard.update("No data", "No JUnit summary loaded.", Tone.NEUTRAL)
+        jenkinsArtifactCard.update("No artifacts", "No Jenkins artifacts loaded.", Tone.NEUTRAL)
+        jenkinsTrendCard.update("No trends", "No Jenkins trend data loaded.", Tone.NEUTRAL)
+        jenkinsOpsCard.update("Unavailable", "Connect Jenkins to load project operations insight.", Tone.NEUTRAL)
+        updateJenkinsInsightPanels(null, null)
         updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
@@ -1117,6 +1240,11 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsApprovalCard.update("None", "No live approval state.", Tone.NEUTRAL)
         jenkinsSuccessCard.update("None", "No successful build selected.", Tone.NEUTRAL)
         jenkinsCompareCard.update("Off", "Compare mode waits for a concrete job selection.", Tone.NEUTRAL)
+        jenkinsTestCard.update("No data", "No JUnit summary loaded.", Tone.NEUTRAL)
+        jenkinsArtifactCard.update("No artifacts", "No Jenkins artifacts loaded.", Tone.NEUTRAL)
+        jenkinsTrendCard.update("No trends", "No Jenkins trend data loaded.", Tone.NEUTRAL)
+        jenkinsOpsCard.update("Waiting", "Choose a concrete Jenkins job to enable deeper insight.", Tone.WARNING)
+        updateJenkinsInsightPanels(null, null)
         updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
@@ -1142,6 +1270,11 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsApprovalCard.update("None", "No live approval state.", Tone.NEUTRAL)
         jenkinsSuccessCard.update("None", "No successful build selected.", Tone.NEUTRAL)
         jenkinsCompareCard.update("Off", "Compare mode is unavailable until a job is matched.", Tone.NEUTRAL)
+        jenkinsTestCard.update("No data", "No JUnit summary loaded.", Tone.NEUTRAL)
+        jenkinsArtifactCard.update("No artifacts", "No Jenkins artifacts loaded.", Tone.NEUTRAL)
+        jenkinsTrendCard.update("No trends", "No Jenkins trend data loaded.", Tone.NEUTRAL)
+        jenkinsOpsCard.update("No match", "No Jenkins project family could be matched for this workspace target.", Tone.WARNING)
+        updateJenkinsInsightPanels(null, null)
         updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
@@ -1215,6 +1348,34 @@ private class MerebJenkinsToolWindowPanel(
             currentCompareContext?.selection?.jobDisplayName ?: "Compare mode is disabled.",
             if (currentCompareContext?.enabled == true) Tone.WARNING else Tone.NEUTRAL
         )
+        jenkinsTestCard.update(
+            staleLiveData?.testSummary?.let { "${it.failedCount} failed" } ?: "Unavailable",
+            staleLiveData?.opsSnapshot?.testHeadline ?: "Test data is unavailable while Jenkins is failing.",
+            when {
+                (staleLiveData?.testSummary?.failedCount ?: 0) > 0 -> Tone.ERROR
+                staleLiveData?.testSummary != null -> Tone.SUCCESS
+                else -> Tone.NEUTRAL
+            }
+        )
+        jenkinsArtifactCard.update(
+            staleLiveData?.artifacts?.size?.let { "$it artifact${if (it == 1) "" else "s"}" } ?: "Unavailable",
+            staleLiveData?.artifacts?.firstOrNull()?.relativePath ?: "Artifact details are unavailable while Jenkins is failing.",
+            if (staleLiveData?.artifacts?.isNotEmpty() == true) Tone.INFO else Tone.NEUTRAL,
+        )
+        jenkinsTrendCard.update(
+            staleLiveData?.trendSummary?.flakyStageCount?.let { "$it flaky" } ?: "Unavailable",
+            staleLiveData?.trendSummary?.sampleSize?.takeIf { it > 0 }?.let { "Latest $it runs for the selected variant." }
+                ?: "Trend analysis is unavailable while Jenkins is failing.",
+            if ((staleLiveData?.trendSummary?.flakyStageCount ?: 0) > 0) Tone.WARNING else Tone.NEUTRAL,
+        )
+        jenkinsOpsCard.update(
+            staleLiveData?.opsSnapshot?.headline ?: "Unavailable",
+            staleLiveData?.opsSnapshot?.let {
+                "${it.buildStatus} • ${it.pendingApprovalCount} approval${if (it.pendingApprovalCount == 1) "" else "s"} • ${it.testHeadline}"
+            } ?: "Showing last known Jenkins state only.",
+            if (staleLiveData != null) Tone.WARNING else Tone.NEUTRAL,
+        )
+        updateJenkinsInsightPanels(staleLiveData, currentCompareContext?.liveData)
         updateButtons()
     }
 
@@ -1294,10 +1455,37 @@ private class MerebJenkinsToolWindowPanel(
                 ?: "Compare mode is disabled.",
             if (compareContext.enabled) Tone.INFO else Tone.NEUTRAL
         )
+        jenkinsTestCard.update(
+            liveData.testSummary?.let { "${it.failedCount} failed / ${it.totalCount}" } ?: "No report",
+            liveData.opsSnapshot?.testHeadline ?: "No test summary for the selected run.",
+            when {
+                (liveData.testSummary?.failedCount ?: 0) > 0 -> Tone.ERROR
+                liveData.testSummary != null -> Tone.SUCCESS
+                else -> Tone.NEUTRAL
+            }
+        )
+        jenkinsArtifactCard.update(
+            "${liveData.artifacts.size} artifact${if (liveData.artifacts.size == 1) "" else "s"}",
+            liveData.artifacts.firstOrNull()?.relativePath ?: "No artifacts for the selected run.",
+            if (liveData.artifacts.isNotEmpty()) Tone.INFO else Tone.NEUTRAL,
+        )
+        jenkinsTrendCard.update(
+            "${liveData.trendSummary.flakyStageCount} flaky",
+            liveData.trendSummary.sampleSize.takeIf { it > 0 }?.let { "Based on the latest $it runs." } ?: "No trend sample available.",
+            if (liveData.trendSummary.flakyStageCount > 0) Tone.WARNING else Tone.SUCCESS,
+        )
+        jenkinsOpsCard.update(
+            liveData.opsSnapshot?.headline ?: liveData.summary.displayName,
+            liveData.opsSnapshot?.let {
+                "${it.buildStatus} • ${it.pendingApprovalCount} approval${if (it.pendingApprovalCount == 1) "" else "s"} • ${it.testHeadline}"
+            } ?: "No operational summary available.",
+            toneForBuildStatus(liveData.selectedRun?.status),
+        )
         stageExcerptLabel.text = currentConsoleExcerpt?.let {
             "Showing ${if (it.anchored) "anchored" else "tail"} console excerpt for ${it.stageName ?: "the selected run"}."
         } ?: "Select a Jenkins stage to inspect a recent console excerpt."
         stageExcerptArea.text = currentConsoleExcerpt?.excerpt.orEmpty()
+        updateJenkinsInsightPanels(liveData, compareContext.liveData)
         updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
@@ -1311,6 +1499,33 @@ private class MerebJenkinsToolWindowPanel(
         compareStagesModel.clear()
         driftModel.clear()
         timelineModel.clear()
+        jenkinsFailedTestsModel.clear()
+        jenkinsTrendModel.clear()
+    }
+
+    private fun updateJenkinsInsightPanels(
+        primary: MerebJenkinsLiveJobData?,
+        compare: MerebJenkinsLiveJobData?,
+    ) {
+        refill(jenkinsFailedTestsModel, primary?.testSummary?.failedTests.orEmpty())
+        refill(jenkinsTrendModel, primary?.trendSummary?.stages.orEmpty())
+        testSummaryLabel.text = when {
+            primary?.testSummary == null -> "No JUnit summary for the selected run."
+            primary.testSummary.failedCount > 0 ->
+                "${primary.testSummary.failedCount} failed, ${primary.testSummary.skippedCount} skipped, ${primary.testSummary.totalCount} total."
+            else -> "${primary.testSummary.totalCount} total, ${primary.testSummary.passedCount} passed."
+        }
+        compareTestSummaryLabel.text = when {
+            compare == null -> "Compare-side test summary is unavailable."
+            compare.testSummary == null -> "Compare run has no published JUnit report."
+            compare.testSummary.failedCount > 0 ->
+                "Compare: ${compare.testSummary.failedCount} failed / ${compare.testSummary.totalCount} total."
+            else -> "Compare: ${compare.testSummary.totalCount} passed."
+        }
+        trendSummaryLabel.text = primary?.trendSummary?.sampleSize?.takeIf { it > 0 }?.let { sample ->
+            val flaky = primary.trendSummary.flakyStageCount
+            "$flaky flaky stage${if (flaky == 1) "" else "s"} across the latest $sample runs."
+        } ?: "Flaky/stage trend analysis is unavailable."
     }
 
     private fun openInJenkins() {
@@ -1326,10 +1541,121 @@ private class MerebJenkinsToolWindowPanel(
     }
 
     private fun openSelectedLog() {
-        val url = currentConsoleExcerpt?.logUrl
+        val liveData = currentLiveData
+        val selectedStage = jenkinsStagesList.selectedValue
+        val selectedRun = liveData?.selectedRun
+        val failingStage = selectedRun?.stages?.firstOrNull { it.status.contains("FAIL", ignoreCase = true) || it.status.contains("UNSTABLE", ignoreCase = true) }
+        val targetStage = selectedStage ?: failingStage
+        if (targetStage != null && selectedRun != null && (currentConsoleExcerpt?.stageName != targetStage.name || currentConsoleExcerpt?.runId != selectedRun.id)) {
+            loadConsoleExcerpt(primary = true)
+        }
+        val url = currentConsoleExcerpt?.takeIf { targetStage == null || it.stageName == targetStage.name }?.logUrl
+            ?: currentLiveData?.actionAvailability?.failingLogUrl
             ?: currentLiveData?.selectedRun?.url?.let { "${it.trimEnd('/')}/console" }
             ?: currentCompareContext?.liveData?.selectedRun?.url?.let { "${it.trimEnd('/')}/console" }
         browseJenkinsUrl(url, "No Jenkins console log is available for the current selection.")
+    }
+
+    private fun openApproval() {
+        val url = jenkinsPendingList.selectedValue?.proceedUrl
+            ?: currentLiveData?.pendingInputs?.firstOrNull()?.proceedUrl
+            ?: currentLiveData?.actionAvailability?.approvalUrl
+        browseJenkinsUrl(url, "No Jenkins approval URL is available for the current selection.")
+    }
+
+    private fun rebuildSelectedJob() {
+        val selection = currentJobVariantSelection ?: return
+        val snapshot = jenkinsStateService.snapshot()
+        val token = jenkinsStateService.resolveToken(snapshot.baseUrl, snapshot.username)
+        if (token.isNullOrBlank()) {
+            jenkinsErrorLabel.text = "No Jenkins API token is stored for the current Jenkins connection."
+            return
+        }
+        val summary = currentLiveData?.summary
+        val prompt = buildString {
+            append("Trigger a Jenkins rebuild for:\n")
+            append(selection.selected.jobDisplayName)
+            append("\n\nJob path:\n")
+            append(selection.selected.jobPath)
+        }
+        val confirmed = Messages.showYesNoDialog(
+            project,
+            prompt,
+            "Confirm Jenkins Rebuild",
+            "Rebuild",
+            "Cancel",
+            Messages.getQuestionIcon(),
+        )
+        if (confirmed != Messages.YES) return
+
+        jenkinsErrorLabel.text = "Triggering Jenkins rebuild…"
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token)
+            val result = client.triggerRebuild(selection.selected.jobPath, summary)
+            ApplicationManager.getApplication().invokeLater({
+                when (result) {
+                    is MerebJenkinsApiResult.Success -> {
+                        if (result.value.success) {
+                            jenkinsErrorLabel.text = result.value.message
+                            scheduleJenkinsRefresh(delayMs = 0, manual = true)
+                        } else {
+                            jenkinsErrorLabel.text = result.value.message
+                            result.value.openedUrl?.let { BrowserUtil.browse(it) }
+                        }
+                    }
+                    is MerebJenkinsApiResult.Failure -> {
+                        jenkinsErrorLabel.text = result.problem.message ?: "Unable to trigger a Jenkins rebuild."
+                    }
+                }
+                updateButtons()
+            }, ModalityState.any(), Condition<Any?> { disposed || project.isDisposed })
+        }
+    }
+
+    private fun openSelectedArtifact() {
+        val artifact = jenkinsArtifactsList.selectedValue ?: return
+        browseJenkinsUrl(artifact.url, "No Jenkins artifact URL is available for the selected artifact.")
+    }
+
+    private fun copySelectedArtifactLink() {
+        val artifact = jenkinsArtifactsList.selectedValue ?: return
+        if (artifact.url.isBlank()) {
+            jenkinsErrorLabel.text = "No Jenkins artifact URL is available for the selected artifact."
+            return
+        }
+        CopyPasteManager.getInstance().setContents(StringSelection(artifact.url))
+        jenkinsErrorLabel.text = "Copied Jenkins artifact link for ${artifact.label}."
+    }
+
+    private fun downloadSelectedArtifact() {
+        val artifact = jenkinsArtifactsList.selectedValue ?: return
+        val snapshot = jenkinsStateService.snapshot()
+        val token = jenkinsStateService.resolveToken(snapshot.baseUrl, snapshot.username)
+        if (token.isNullOrBlank()) {
+            jenkinsErrorLabel.text = "No Jenkins API token is stored for the current Jenkins connection."
+            return
+        }
+        val chooser = JFileChooser().apply {
+            selectedFile = java.io.File(artifact.label)
+            dialogTitle = "Save Jenkins Artifact"
+        }
+        if (chooser.showSaveDialog(root) != JFileChooser.APPROVE_OPTION) return
+        val destination = chooser.selectedFile?.toPath() ?: return
+        jenkinsErrorLabel.text = "Downloading ${artifact.label}…"
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token)
+            val result = client.downloadArtifact(artifact, destination)
+            ApplicationManager.getApplication().invokeLater({
+                when (result) {
+                    is MerebJenkinsApiResult.Success -> {
+                        jenkinsErrorLabel.text = "Saved Jenkins artifact to ${result.value.fileName}."
+                    }
+                    is MerebJenkinsApiResult.Failure -> {
+                        jenkinsErrorLabel.text = result.problem.message ?: "Unable to download Jenkins artifact."
+                    }
+                }
+            }, ModalityState.any(), Condition<Any?> { disposed || project.isDisposed })
+        }
     }
 
     private fun rememberViewSelection() {
@@ -1557,7 +1883,20 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun updateCards(analysis: MerebJenkinsAnalysisResult?) {
         if (analysis == null) {
-            listOf(recipeCard, imageCard, releaseCard, relationCard, noticeCard, fixCard, jenkinsConnectionCard, jenkinsJobCard, jenkinsBuildCard).forEach {
+            listOf(
+                recipeCard,
+                imageCard,
+                releaseCard,
+                relationCard,
+                noticeCard,
+                fixCard,
+                jenkinsConnectionCard,
+                jenkinsJobCard,
+                jenkinsBuildCard,
+                jenkinsTestCard,
+                jenkinsTrendCard,
+                jenkinsOpsCard,
+            ).forEach {
                 it.update("No config", "Open a supported config file to populate this panel.", Tone.NEUTRAL)
             }
             return
@@ -1602,6 +1941,29 @@ private class MerebJenkinsToolWindowPanel(
             summary.safeFixes.firstOrNull()?.label ?: "No safe fixes available.",
             if (summary.safeFixes.isNotEmpty()) Tone.SUCCESS else Tone.NEUTRAL
         )
+        val ops = currentLiveData?.opsSnapshot
+        jenkinsTestCard.update(
+            currentLiveData?.testSummary?.let { "${it.failedCount} failed / ${it.totalCount}" } ?: "No report",
+            ops?.testHeadline ?: "No JUnit summary for the selected run.",
+            when {
+                (currentLiveData?.testSummary?.failedCount ?: 0) > 0 -> Tone.ERROR
+                currentLiveData?.testSummary != null -> Tone.SUCCESS
+                else -> Tone.NEUTRAL
+            }
+        )
+        jenkinsTrendCard.update(
+            currentLiveData?.trendSummary?.flakyStageCount?.let { "$it flaky" } ?: "No trends",
+            currentLiveData?.trendSummary?.sampleSize?.takeIf { it > 0 }?.let { "Latest $it runs analyzed." }
+                ?: "No stage trend data available.",
+            if ((currentLiveData?.trendSummary?.flakyStageCount ?: 0) > 0) Tone.WARNING else Tone.NEUTRAL,
+        )
+        jenkinsOpsCard.update(
+            ops?.headline ?: "No live run",
+            ops?.let {
+                "${it.buildStatus} • ${it.pendingApprovalCount} approvals • ${it.artifactCount} artifacts"
+            } ?: "Connect Jenkins and select a run to populate operations insight.",
+            if (ops != null) toneForBuildStatus(currentLiveData?.selectedRun?.status) else Tone.NEUTRAL,
+        )
     }
 
     private fun updateButtons() {
@@ -1617,7 +1979,16 @@ private class MerebJenkinsToolWindowPanel(
         remapJobButton.isEnabled = snapshot.isConfigured && currentTarget != null
         refreshJenkinsButton.isEnabled = snapshot.isConfigured && currentTarget != null
         openInJenkinsButton.isEnabled = currentLiveData != null || currentJobVariantSelection != null || currentJobMapping != null
-        openLogButton.isEnabled = currentConsoleExcerpt != null || currentLiveData?.selectedRun != null || currentCompareContext?.liveData?.selectedRun != null
+        val actions = currentLiveData?.actionAvailability
+        openLogButton.isEnabled = currentConsoleExcerpt != null ||
+            actions?.failingLogUrl != null ||
+            currentLiveData?.selectedRun != null ||
+            currentCompareContext?.liveData?.selectedRun != null
+        openApprovalButton.isEnabled = actions?.approvalUrl != null || currentLiveData?.pendingInputs?.isNotEmpty() == true
+        rebuildButton.isEnabled = actions?.canRebuild == true
+        artifactOpenButton.isEnabled = jenkinsArtifactsList.selectedValue != null
+        artifactCopyLinkButton.isEnabled = jenkinsArtifactsList.selectedValue != null
+        artifactDownloadButton.isEnabled = snapshot.isConfigured && jenkinsArtifactsList.selectedValue != null
     }
 
     private fun buildSubtitle(target: MerebJenkinsWorkspaceTarget, analysis: MerebJenkinsAnalysisResult): String {

@@ -11,7 +11,7 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 class MerebJenkinsJenkinsIntegrationTest {
-    private val summaryTree = "tree=name,fullName,url,color,_class,buildable,inQueue,jobs[name],queueItem[why,stuck,blocked,id],lastBuild[number,url,building,result,duration,timestamp],lastSuccessfulBuild[number,url,result,duration,timestamp]"
+    private val summaryTree = "tree=name,fullName,url,color,_class,buildable,inQueue,jobs[name],queueItem[why,stuck,blocked,id],property[_class,parameterDefinitions[name]],lastBuild[number,url,building,result,duration,timestamp],lastSuccessfulBuild[number,url,result,duration,timestamp]"
 
     @BeforeEach
     fun clearCaches() {
@@ -216,10 +216,15 @@ class MerebJenkinsJenkinsIntegrationTest {
                 {"id":"15","name":"#15","status":"IN_PROGRESS","url":"https://jenkins.example.com/job/svc-auth/15/","durationMillis":1234,"stages":[{"id":"build","name":"Build","status":"SUCCESS","durationMillis":1000},{"id":"deploy","name":"Deploy","status":"IN_PROGRESS","durationMillis":234}]}
                 """.trimIndent()
             ),
-            "https://jenkins.example.com/job/svc-auth/15/wfapi/pendingInputActions" to ok("""[{"id":"input-1","message":"Approve deploy"}]"""),
+            "https://jenkins.example.com/job/svc-auth/15/wfapi/pendingInputActions" to ok("""[{"id":"input-1","message":"Approve deploy","proceedUrl":"/job/svc-auth/15/input/approve"}]"""),
             "https://jenkins.example.com/job/svc-auth/15/api/json?tree=url,artifacts[fileName,relativePath]" to ok(
                 """
                 {"url":"https://jenkins.example.com/job/svc-auth/15/","artifacts":[{"fileName":"build.log","relativePath":"logs/build.log"}]}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/svc-auth/15/testReport/api/json?tree=passCount,failCount,skipCount,duration,suites[name,cases[name,status,className,duration,errorDetails,errorStackTrace]]" to ok(
+                """
+                {"passCount":8,"failCount":1,"skipCount":1,"duration":42,"suites":[{"name":"DeploySuite","cases":[{"name":"deploys cleanly","status":"FAILED","className":"DeploySuite","duration":5,"errorDetails":"boom"}]}]}
                 """.trimIndent()
             ),
         )
@@ -234,7 +239,13 @@ class MerebJenkinsJenkinsIntegrationTest {
         assertEquals(2, liveData.selectedRun?.stages?.size)
         assertEquals(1, liveData.pendingInputs.size)
         assertEquals("Approve deploy", liveData.pendingInputs.single().message)
+        assertEquals("https://jenkins.example.com/job/svc-auth/15/input/approve", liveData.pendingInputs.single().proceedUrl)
         assertEquals("https://jenkins.example.com/job/svc-auth/15/artifact/logs/build.log", liveData.artifacts.single().url)
+        assertEquals(1, liveData.testSummary?.failedCount)
+        assertEquals(1, liveData.trendSummary.sampleSize)
+        assertEquals(0, liveData.trendSummary.flakyStageCount)
+        assertTrue(liveData.actionAvailability.approvalUrl.orEmpty().contains("/input/approve"))
+        assertTrue(liveData.opsSnapshot?.testHeadline.orEmpty().contains("1 failed"))
     }
 
     @Test
@@ -272,6 +283,92 @@ class MerebJenkinsJenkinsIntegrationTest {
         assertEquals("https://jenkins.example.com/job/svc-auth/15/", liveData.selectedRun?.url)
         assertEquals("https://jenkins.example.com/job/svc-auth/15/", liveData.summary.lastBuildUrl)
         assertEquals("https://jenkins.example.com/job/svc-auth/15/artifact/reports/report.txt", liveData.artifacts.single().url)
+    }
+
+    @Test
+    fun `jenkins client aggregates flaky stage trends across recent runs`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/job/svc-auth/api/json?$summaryTree" to ok(
+                """{"name":"svc-auth","fullName":"svc-auth","url":"https://jenkins.example.com/job/svc-auth/","color":"blue"}"""
+            ),
+            "https://jenkins.example.com/job/svc-auth/wfapi/runs" to ok(
+                """
+                [
+                  {"id":"12","name":"#12","status":"FAILED","url":"https://jenkins.example.com/job/svc-auth/12/","stages":[{"id":"build","name":"Build","status":"SUCCESS","durationMillis":1000},{"id":"deploy","name":"Deploy","status":"FAILED","durationMillis":200}]},
+                  {"id":"11","name":"#11","status":"SUCCESS","url":"https://jenkins.example.com/job/svc-auth/11/","stages":[{"id":"build","name":"Build","status":"SUCCESS","durationMillis":900},{"id":"deploy","name":"Deploy","status":"SUCCESS","durationMillis":210}]},
+                  {"id":"10","name":"#10","status":"UNSTABLE","url":"https://jenkins.example.com/job/svc-auth/10/","stages":[{"id":"build","name":"Build","status":"SUCCESS","durationMillis":800},{"id":"deploy","name":"Deploy","status":"UNSTABLE","durationMillis":205}]}
+                ]
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/svc-auth/wfapi" to ok("""{"stages":[]}"""),
+            "https://jenkins.example.com/job/svc-auth/12/wfapi/describe" to ok(
+                """{"id":"12","name":"#12","status":"FAILED","url":"https://jenkins.example.com/job/svc-auth/12/","stages":[{"id":"build","name":"Build","status":"SUCCESS","durationMillis":1000},{"id":"deploy","name":"Deploy","status":"FAILED","durationMillis":200}]}"""
+            ),
+            "https://jenkins.example.com/job/svc-auth/12/wfapi/pendingInputActions" to ok("""[]"""),
+            "https://jenkins.example.com/job/svc-auth/12/api/json?tree=url,artifacts[fileName,relativePath]" to ok("""{"url":"https://jenkins.example.com/job/svc-auth/12/","artifacts":[]}"""),
+            "https://jenkins.example.com/job/svc-auth/12/testReport/api/json?tree=passCount,failCount,skipCount,duration,suites[name,cases[name,status,className,duration,errorDetails,errorStackTrace]]" to ok("""{"passCount":3,"failCount":0,"skipCount":0,"duration":5,"suites":[]}"""),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.fetchLiveJobData("svc-auth")
+
+        val liveData = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsLiveJobData>>(result).value
+        assertEquals(3, liveData.trendSummary.sampleSize)
+        assertEquals(1, liveData.trendSummary.flakyStageCount)
+        assertEquals("Deploy", liveData.trendSummary.stages.first().stageName)
+        assertTrue(liveData.trendSummary.stages.first().flaky)
+    }
+
+    @Test
+    fun `trigger rebuild posts to Jenkins for non parameterized jobs`() {
+        var postUrl: String? = null
+        val transport = object : MerebJenkinsHttpTransport {
+            override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+                error("Unexpected GET $url")
+            }
+
+            override fun post(url: String, headers: Map<String, String>, body: String?): MerebJenkinsHttpResponse {
+                postUrl = url
+                return MerebJenkinsHttpResponse(201, "", url)
+            }
+        }
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.triggerRebuild(
+            "svc-auth/main",
+            MerebJenkinsJobSummary(
+                jobPath = "svc-auth/main",
+                name = "main",
+                displayName = "svc-auth/main",
+                url = "https://jenkins.example.com/job/svc-auth/job/main/",
+            ),
+        )
+
+        val action = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsActionResult>>(result).value
+        assertTrue(action.success)
+        assertEquals("https://jenkins.example.com/job/svc-auth/job/main/build", postUrl)
+    }
+
+    @Test
+    fun `trigger rebuild falls back for parameterized jobs`() {
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", fakeTransport())
+
+        val result = client.triggerRebuild(
+            "svc-auth/main",
+            MerebJenkinsJobSummary(
+                jobPath = "svc-auth/main",
+                name = "main",
+                displayName = "svc-auth/main",
+                url = "https://jenkins.example.com/job/svc-auth/job/main/",
+                parameterized = true,
+                parameterNames = listOf("VERSION"),
+            ),
+        )
+
+        val action = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsActionResult>>(result).value
+        assertTrue(!action.success)
+        assertTrue(action.message.contains("parameterized"))
+        assertEquals("https://jenkins.example.com/job/svc-auth/job/main/", action.openedUrl)
     }
 
     @Test
