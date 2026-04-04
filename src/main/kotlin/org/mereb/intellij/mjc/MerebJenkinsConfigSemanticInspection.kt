@@ -7,34 +7,32 @@ import com.intellij.codeInspection.ProblemHighlightType
 import com.intellij.psi.PsiFile
 
 class MerebJenkinsConfigSemanticInspection : LocalInspectionTool() {
-
     private val analyzer = MerebJenkinsConfigAnalyzer()
 
     override fun checkFile(
         file: PsiFile,
         manager: InspectionManager,
-        isOnTheFly: Boolean
+        isOnTheFly: Boolean,
     ): Array<ProblemDescriptor> {
         val virtualFile = file.virtualFile ?: return ProblemDescriptor.EMPTY_ARRAY
         if (!MerebJenkinsConfigPaths.isSchemaTarget(virtualFile)) {
             return ProblemDescriptor.EMPTY_ARRAY
         }
 
-        return analyzer.analyze(file.text).map { issue ->
+        val analysis = analyzer.analyzeDetailed(file.text, virtualFile.path)
+        return analysis.findings.map { finding ->
+            val psiElement = MerebJenkinsPsiUtils.findBestElement(file, finding.path, finding.anchorPath) ?: file
             manager.createProblemDescriptor(
-                file,
-                issue.message,
+                psiElement,
+                finding.message,
                 isOnTheFly,
-                emptyArray(),
-                issue.toHighlightType()
+                MerebJenkinsQuickFixFactory.createQuickFixes(finding, file, analysis),
+                when (finding.severity) {
+                    MerebJenkinsSeverity.ERROR -> ProblemHighlightType.GENERIC_ERROR_OR_WARNING
+                    MerebJenkinsSeverity.WARNING -> ProblemHighlightType.WEAK_WARNING
+                }
             )
         }.toTypedArray()
     }
-
-    private fun MerebJenkinsConfigAnalyzer.Issue.toHighlightType(): ProblemHighlightType {
-        return when (severity) {
-            MerebJenkinsConfigAnalyzer.Severity.ERROR -> ProblemHighlightType.GENERIC_ERROR_OR_WARNING
-            MerebJenkinsConfigAnalyzer.Severity.WARNING -> ProblemHighlightType.WEAK_WARNING
-        }
-    }
 }
+

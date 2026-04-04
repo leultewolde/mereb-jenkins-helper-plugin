@@ -32,7 +32,6 @@ class MerebJenkinsConfigPluginTest {
     @Test
     fun `schema provider exposes bundled schema resource`() {
         val provider = MerebJenkinsSchemaFileProvider()
-
         assertNotNull(provider.getSchemaResource())
     }
 
@@ -45,14 +44,13 @@ class MerebJenkinsConfigPluginTest {
     }
 
     @Test
-    fun `semantic analyzer reports warnings and errors`() {
-        val analyzer = MerebJenkinsConfigAnalyzer()
-
-        val issues = analyzer.analyze(
+    fun `engine returns field scoped findings and summary`() {
+        val result = MerebJenkinsConfigEngine().analyze(
             """
-            version: 2
+            version: 1
             delivery:
               mode: staged
+            image: false
             deploy:
               order: [dev, stg]
               dev:
@@ -60,37 +58,95 @@ class MerebJenkinsConfigPluginTest {
                 autoPromote: true
                 approval:
                   message: ship it
+            release:
+              autoTag:
+                enabled: true
             """.trimIndent()
         )
 
-        assertTrue(issues.any { it.message == "version must be 1" })
-        assertTrue(issues.any { it.message == "Set recipe explicitly to improve readability and editor validation." })
-        assertTrue(issues.any { it.message == "image.repository or app.name must be provided when docker image builds are enabled" })
-        assertTrue(issues.any { it.message == "deploy.order references unknown environments: stg" })
-        assertTrue(issues.any { it.message == "deploy.dev.when is ignored in staged mode" })
-        assertTrue(issues.any { it.message == "deploy.dev.autoPromote is ignored in staged mode" })
-        assertTrue(issues.any { it.message == "deploy.dev.approval is ignored in staged mode" })
+        assertEquals("service", result.resolvedRecipe)
+        assertTrue(result.findings.any { it.message == "Set recipe explicitly to improve readability and editor validation." })
+        assertTrue(result.findings.any { it.path?.toString() == "deploy.order[1]" })
+        assertTrue(result.findings.any { it.path?.toString() == "deploy.dev.when" })
+        assertTrue(result.summary.ignoredFields.any { it.contains("deploy.dev.when") })
+        assertTrue(result.summary.releaseEnabled)
     }
 
     @Test
-    fun `semantic analyzer validates explicit recipe compatibility`() {
-        val analyzer = MerebJenkinsConfigAnalyzer()
-
-        val issues = analyzer.analyze(
+    fun `engine exposes staged mode removal quick fix`() {
+        val result = MerebJenkinsConfigEngine().analyze(
             """
             version: 1
-            recipe: package
+            recipe: service
+            delivery:
+              mode: staged
             image:
-              enabled: true
-              repository: ghcr.io/mereb/test
+              repository: registry.example.com/demo
             deploy:
               dev:
-                namespace: apps
+                when: branch=main
             """.trimIndent()
         )
 
-        assertTrue(issues.any { it.message == "recipe=package cannot enable image orchestration" })
-        assertTrue(issues.any { it.message == "recipe=package cannot define deploy environments" })
-        assertTrue(issues.any { it.message == "recipe=package requires release automation or release stages" })
+        val finding = result.findings.first { it.id == "ignored-deploy-when" }
+        assertTrue(finding.quickFixes.any { it.kind == MerebJenkinsFixKind.REMOVE_KEY && it.label == "Remove ignored key when" })
+    }
+
+    @Test
+    fun `engine suggests obvious recipe spelling replacement`() {
+        val result = MerebJenkinsConfigEngine().analyze(
+            """
+            version: 1
+            recipe: services
+            image:
+              repository: registry.example.com/demo
+            deploy:
+              dev:
+                namespace: apps-dev
+            """.trimIndent()
+        )
+
+        val recipeFinding = result.findings.first { it.id == "recipe-invalid" }
+        assertTrue(recipeFinding.quickFixes.any { it.kind == MerebJenkinsFixKind.REPLACE_RECIPE && it.data["recipe"] == "service" })
+    }
+
+    @Test
+    fun `project scanner derives expected recipe from current repo layouts`() {
+        val scan = MerebJenkinsProjectScanner.scan("/tmp/mereb-social/web/mfe-admin/.ci/ci.yml")
+        assertEquals("/tmp/mereb-social/web/mfe-admin", scan.projectRootPath)
+        assertEquals("microfrontend", scan.expectedRecipe)
+    }
+
+    @Test
+    fun `migration planner updates jenkinsfile path text`() {
+        val updated = MerebJenkinsMigrationPlanner.updateJenkinsfileText(
+            """
+            @Library('mereb-jenkins') _
+            ciV1(configPath: '.ci/ci.yml')
+            """.trimIndent()
+        )
+
+        assertTrue(updated.contains(".ci/ci.mjc"))
+        assertFalse(updated.contains(".ci/ci.yml"))
+    }
+
+    @Test
+    fun `upstream checker compares schema hashes`() {
+        val checker = MerebJenkinsUpstreamChecker(fetch = { """{"version":1}""" })
+        val current = checker.compareWithRemote("""{"version":1}""")
+        val stale = checker.compareWithRemote("""{"version":2}""")
+
+        assertTrue(current.isCurrent)
+        assertFalse(stale.isCurrent)
+        assertNotNull(stale.remoteHash)
+    }
+
+    @Test
+    fun `snippet templates include common starter blocks`() {
+        val labels = MerebJenkinsTemplates.snippetTemplates().map { it.first }
+
+        assertTrue("service recipe" in labels)
+        assertTrue("image block" in labels)
+        assertTrue("release autoTag" in labels)
     }
 }

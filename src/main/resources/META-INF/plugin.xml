@@ -3,8 +3,9 @@
     <name>Mereb Jenkins Helper</name>
     <vendor>Mereb</vendor>
     <description><![CDATA[
-    YAML-backed editor support for Mereb Jenkins configuration files. Adds <code>.mjc</code>
-    file handling, schema validation, and guidance for migrating away from legacy filenames.
+    Interactive editor support for Mereb Jenkins configuration files. Adds <code>.mjc</code>
+    file handling, schema validation, field-level inspections, one-click fixes, recipe-aware
+    config generation, migration help, a pipeline preview tool window, and upstream schema checks.
   ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -16,8 +17,19 @@
                 name="Mereb Jenkins Configuration"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigurationFileType"
                 fieldName="INSTANCE"
+                language="yaml"
                 extensions="mjc"/>
         <jsonSchemaProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
+        <completion.contributor
+                language="YAML"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsCompletionContributor"/>
+        <lang.documentationProvider
+                language="YAML"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsDocumentationProvider"/>
+        <toolWindow id="Mereb Jenkins"
+                    anchor="right"
+                    factoryClass="org.mereb.intellij.mjc.MerebJenkinsToolWindowFactory"
+                    canCloseContents="false"/>
         <localInspection
                 language="YAML"
                 shortName="LegacyMerebJenkinsConfigFilename"
@@ -35,4 +47,19 @@
                 level="WARNING"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigSemanticInspection"/>
     </extensions>
+
+    <actions>
+        <action id="org.mereb.intellij.mjc.NewConfig"
+                class="org.mereb.intellij.mjc.MerebJenkinsNewConfigAction"
+                text="New Mereb Jenkins Config"
+                description="Create a recipe-aware Mereb Jenkins config">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+        <action id="org.mereb.intellij.mjc.MigrateConfig"
+                class="org.mereb.intellij.mjc.MerebJenkinsMigrationAssistantAction"
+                text="Migrate Mereb Jenkins Config"
+                description="Preview and apply a conservative migration to .ci/ci.mjc">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+        </action>
+    </actions>
 </idea-plugin>

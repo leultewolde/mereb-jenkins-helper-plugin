@@ -7,22 +7,24 @@ import com.intellij.codeInspection.ProblemHighlightType
 import com.intellij.psi.PsiFile
 
 class LegacyMerebJenkinsConfigInspection : LocalInspectionTool() {
+    private val analyzer = MerebJenkinsConfigAnalyzer()
 
     override fun checkFile(
         file: PsiFile,
         manager: InspectionManager,
-        isOnTheFly: Boolean
+        isOnTheFly: Boolean,
     ): Array<ProblemDescriptor> {
         val virtualFile = file.virtualFile ?: return ProblemDescriptor.EMPTY_ARRAY
         if (!MerebJenkinsConfigPaths.isLegacy(virtualFile)) {
             return ProblemDescriptor.EMPTY_ARRAY
         }
 
+        val analysis = analyzer.analyzeDetailed(file.text, virtualFile.path)
         val problem = manager.createProblemDescriptor(
             file,
             MESSAGE,
             isOnTheFly,
-            emptyArray(),
+            MerebJenkinsQuickFixFactory.legacyQuickFixes(file, analysis),
             ProblemHighlightType.WEAK_WARNING
         )
         return arrayOf(problem)

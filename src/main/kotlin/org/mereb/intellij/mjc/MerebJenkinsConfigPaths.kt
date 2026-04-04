@@ -22,6 +22,8 @@ object MerebJenkinsConfigPaths {
 
     fun preferredPath(): String = PRIMARY_CONFIG
 
+    fun supportedRelativePaths(): List<String> = listOf(PRIMARY_CONFIG, PROJECT_YAML_CONFIG, ROOT_YAML_CONFIG)
+
     fun isSchemaTargetPath(path: String): Boolean {
         return when (normalize(path)) {
             PRIMARY_CONFIG, PROJECT_YAML_CONFIG, ROOT_YAML_CONFIG -> true
@@ -46,4 +48,3 @@ object MerebJenkinsConfigPaths {
         }
     }
 }
-

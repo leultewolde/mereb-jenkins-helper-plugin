@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "org.mereb.intellij"
-version = "0.1.5"
+version = "0.1.6"
 
 val pluginSinceBuild = "242"
 val pluginUntilBuild = "261.*"
@@ -100,7 +100,9 @@ repositories {
 dependencies {
     implementation("org.yaml:snakeyaml:2.3")
     testImplementation(kotlin("test"))
+    testImplementation("junit:junit:4.13.2")
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine:5.10.2")
     intellijPlatform {
         intellijIdeaCommunity("2024.2.5")
         bundledPlugin("org.jetbrains.plugins.yaml")
