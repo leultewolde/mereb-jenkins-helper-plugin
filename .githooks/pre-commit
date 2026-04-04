@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+hook_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$hook_dir/.." && pwd)"
+build_file="build.gradle.kts"
+
+cd "$repo_root"
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [[ -z "$staged_files" ]]; then
+  exit 0
+fi
+
+if ! grep -Eq '^(src/|schema-cache/|gradle/|build.gradle\.kts$|settings\.gradle\.kts$|gradle\.properties$)' <<< "$staged_files"; then
+  exit 0
+fi
+
+if git diff --cached -- "$build_file" | grep -Eq '^[+-]version = "[0-9]+\.[0-9]+\.[0-9]+"$'; then
+  exit 0
+fi
+
+current_version="$(sed -n 's/^version = "\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)"$/\1/p' "$build_file")"
+if [[ -z "$current_version" ]]; then
+  echo "Unable to read plugin version from $build_file" >&2
+  exit 1
+fi
+
+if ! git rev-parse "refs/tags/v${current_version}" >/dev/null 2>&1; then
+  exit 0
+fi
+
+next_version="$("$repo_root/scripts/bump-plugin-version.sh")"
+git add "$build_file"
+echo "Bumped plugin version to $next_version"

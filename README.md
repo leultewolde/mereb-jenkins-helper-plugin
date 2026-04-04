@@ -52,15 +52,22 @@ The GitHub Pages root URL also serves a small landing page that links to the rep
 
 - `./gradlew runIde` launches a sandbox IntelliJ instance with the plugin installed.
 - `./gradlew test` runs the plugin test suite.
+- `./scripts/install-git-hooks.sh` installs the repo-managed pre-commit hook.
 
 ## Releases
 
-Releases are tag-driven through GitHub Actions and GitHub Pages.
+Releases are push-driven through GitHub Actions and GitHub Pages.
 
-1. Bump `version` in `build.gradle.kts`.
-2. Commit and push the change.
-3. Create and push a matching tag like `v0.1.3`.
+1. Run `./scripts/install-git-hooks.sh` once on your machine.
+2. Commit plugin source/config changes normally.
+3. The pre-commit hook bumps `build.gradle.kts` when a new release line is needed.
+4. Push to `main`.
 
-The release workflow validates that the tag matches the Gradle version, builds the plugin, generates `updatePlugins.xml`, and publishes the repository to GitHub Pages.
+When relevant plugin files change on `main`, the release workflow:
+
+- reads the plugin version from `build.gradle.kts`
+- creates the matching Git tag automatically
+- builds the plugin and repository feed
+- publishes the repository to GitHub Pages
 
 See [`docs/deploy-plugin.md`](docs/deploy-plugin.md) for the maintainer release flow.
