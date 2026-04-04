@@ -60,6 +60,9 @@
         <annotator
                 language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsScalarAnnotator"/>
+        <codeInsight.lineMarkerProvider
+                language="yaml"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsLineMarkerProvider"/>
         <localInspection
                 language="yaml"
                 shortName="LegacyMerebJenkinsConfigFilename"

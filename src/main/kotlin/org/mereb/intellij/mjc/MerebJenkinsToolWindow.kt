@@ -5,6 +5,9 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.components.service
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.event.CaretEvent
+import com.intellij.openapi.editor.event.CaretListener
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.FileDocumentManager
@@ -17,9 +20,12 @@ import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.util.Condition
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.IconLoader
+import com.intellij.psi.PsiManager
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VfsUtil
 import com.intellij.openapi.vfs.VirtualFileManager
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.ColoredListCellRenderer
@@ -44,14 +50,13 @@ import java.nio.file.Paths
 import java.util.concurrent.Future
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.BorderFactory
+import javax.swing.JCheckBox
 import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComponent
-import javax.swing.JPanel
 import javax.swing.JList
-import com.intellij.openapi.editor.EditorFactory
-import com.intellij.openapi.vfs.newvfs.BulkFileListener
-import com.intellij.openapi.vfs.newvfs.events.VFileEvent
+import javax.swing.JPanel
+import javax.swing.JTextArea
 
 class MerebJenkinsToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
@@ -73,6 +78,7 @@ private class MerebJenkinsToolWindowPanel(
     private val analyzer = MerebJenkinsConfigAnalyzer()
     private val upstreamChecker = MerebJenkinsUpstreamChecker()
     private val jenkinsStateService = service<MerebJenkinsJenkinsStateService>()
+    private val uiStateService = service<MerebJenkinsProjectUiStateService>()
     private val upstreamRefreshVersion = AtomicInteger()
     private val jenkinsRefreshVersion = AtomicInteger()
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
@@ -88,16 +94,25 @@ private class MerebJenkinsToolWindowPanel(
     private var availableTargets: List<MerebJenkinsWorkspaceTarget> = emptyList()
     private var updatingTargetSelector = false
     private var updatingVariantSelector = false
+    private var updatingRunSelectors = false
     private var currentJobMapping: MerebJenkinsJobMapping? = null
     private var currentJobVariantSelection: MerebJenkinsJobVariantSelection? = null
     private var currentLiveData: MerebJenkinsLiveJobData? = null
+    private var currentCompareContext: MerebJenkinsCompareContext? = null
     private var currentJenkinsProblem: MerebJenkinsApiProblem? = null
+    private var currentSelectedPath: MerebJenkinsPath? = null
+    private var currentStageMappings: List<MerebJenkinsConfigStageMapping> = emptyList()
+    private var currentDriftFindings: List<MerebJenkinsDriftFinding> = emptyList()
+    private var currentDeploymentTimeline: List<MerebJenkinsDeploymentTimelineEntry> = emptyList()
+    private var currentImpactPreview: MerebJenkinsImpactPreview? = null
+    private var currentConsoleExcerpt: MerebJenkinsConsoleExcerpt? = null
     private var pendingJobSelectionRoots: MutableSet<String> = linkedSetOf()
     private val manualJobVariantSelections: MutableMap<String, String> = linkedMapOf()
 
     private val root = JPanel(BorderLayout(0, 12)).apply {
         border = JBUI.Borders.empty(12)
     }
+    private val tabs = JBTabbedPane()
 
     private val titleLabel = JBLabel("Mereb Jenkins", toolWindowIcon(), JBLabel.LEADING).apply {
         font = JBFont.h3().asBold()
@@ -115,6 +130,8 @@ private class MerebJenkinsToolWindowPanel(
     private val remapJobButton = JButton("Remap Job")
     private val refreshJenkinsButton = JButton("Refresh Live Data")
     private val openInJenkinsButton = JButton("Open in Jenkins")
+    private val openLogButton = JButton("Open Full Log")
+    private val compareModeToggle = JCheckBox("Compare to main")
 
     private val recipeCard = StatusCard("Recipe")
     private val imageCard = StatusCard("Image")
@@ -125,6 +142,10 @@ private class MerebJenkinsToolWindowPanel(
     private val jenkinsConnectionCard = StatusCard("Jenkins")
     private val jenkinsJobCard = StatusCard("Job")
     private val jenkinsBuildCard = StatusCard("Live Build")
+    private val jenkinsQueueCard = StatusCard("Queue")
+    private val jenkinsApprovalCard = StatusCard("Approval")
+    private val jenkinsSuccessCard = StatusCard("Last Success")
+    private val jenkinsCompareCard = StatusCard("Compare")
 
     private val findingsModel = DefaultListModel<MerebJenkinsFinding>()
     private val sectionsModel = DefaultListModel<MerebJenkinsSectionState>()
@@ -134,6 +155,10 @@ private class MerebJenkinsToolWindowPanel(
     private val jenkinsStagesModel = DefaultListModel<MerebJenkinsStage>()
     private val jenkinsPendingModel = DefaultListModel<MerebJenkinsPendingInput>()
     private val jenkinsArtifactsModel = DefaultListModel<MerebJenkinsArtifactLink>()
+    private val compareRunsModel = DefaultListModel<MerebJenkinsRun>()
+    private val compareStagesModel = DefaultListModel<MerebJenkinsStage>()
+    private val driftModel = DefaultListModel<MerebJenkinsDriftFinding>()
+    private val timelineModel = DefaultListModel<MerebJenkinsDeploymentTimelineEntry>()
 
     private val findingsList = JBList(findingsModel)
     private val sectionsList = JBList(sectionsModel)
@@ -143,6 +168,10 @@ private class MerebJenkinsToolWindowPanel(
     private val jenkinsStagesList = JBList(jenkinsStagesModel)
     private val jenkinsPendingList = JBList(jenkinsPendingModel)
     private val jenkinsArtifactsList = JBList(jenkinsArtifactsModel)
+    private val compareRunsList = JBList(compareRunsModel)
+    private val compareStagesList = JBList(compareStagesModel)
+    private val driftList = JBList(driftModel)
+    private val timelineList = JBList(timelineModel)
 
     private val upstreamStateLabel = JBLabel("Schema status: idle")
     private val upstreamHashesLabel = JBLabel("Run a manual check to compare bundled and live schema hashes.")
@@ -159,9 +188,24 @@ private class MerebJenkinsToolWindowPanel(
         font = JBFont.small()
         foreground = JBColor.GRAY
     }
-    private val jenkinsVariantLabel = JBLabel("View:")
+    private val jenkinsVariantLabel = JBLabel("Primary:")
     private val jenkinsVariantSelector = ComboBox<MerebJenkinsJobCandidate>()
+    private val jenkinsRunLabel = JBLabel("Run:")
+    private val jenkinsRunSelector = ComboBox<MerebJenkinsRunChoice>()
+    private val compareVariantLabel = JBLabel("Compare:")
+    private val compareVariantSelector = ComboBox<MerebJenkinsJobCandidate>()
+    private val compareRunLabel = JBLabel("Compare Run:")
+    private val compareRunSelector = ComboBox<MerebJenkinsRunChoice>()
     private val jenkinsVariantHintLabel = JBLabel("Defaulting to the current branch when possible.")
+    private val flowInfoLabel = JBLabel("Derived runtime sequence. Double-click a step to jump to the relevant YAML section.")
+    private val relationsInfoLabel = JBLabel("Order lists, environment blocks, and recipe-driven sections are color-coded by relation status.")
+    private val stageExcerptLabel = JBLabel("Select a Jenkins stage to inspect a recent console excerpt.")
+    private val stageExcerptArea = JTextArea().apply {
+        isEditable = false
+        lineWrap = true
+        wrapStyleWord = true
+        font = JBFont.small()
+    }
 
     val component: JComponent
         get() = root
@@ -185,6 +229,7 @@ private class MerebJenkinsToolWindowPanel(
         remapJobButton.addActionListener { scheduleJenkinsRefresh(delayMs = 0, forceRemap = true, manual = true) }
         refreshJenkinsButton.addActionListener { scheduleJenkinsRefresh(delayMs = 0, manual = true) }
         openInJenkinsButton.addActionListener { openInJenkins() }
+        openLogButton.addActionListener { openSelectedLog() }
         targetSelector.addActionListener {
             if (updatingTargetSelector) return@addActionListener
             currentTarget = targetSelector.selectedItem as? MerebJenkinsWorkspaceTarget
@@ -199,6 +244,26 @@ private class MerebJenkinsToolWindowPanel(
             manualJobVariantSelections[target.projectRootPath] = selected.jobPath
             scheduleJenkinsRefresh(delayMs = 0, manual = true)
         }
+        compareModeToggle.addActionListener {
+            if (updatingRunSelectors) return@addActionListener
+            rememberViewSelection()
+            scheduleJenkinsRefresh(delayMs = 0, manual = true)
+        }
+        jenkinsRunSelector.addActionListener {
+            if (updatingRunSelectors) return@addActionListener
+            rememberViewSelection()
+            scheduleJenkinsRefresh(delayMs = 0, manual = true)
+        }
+        compareVariantSelector.addActionListener {
+            if (updatingRunSelectors) return@addActionListener
+            rememberViewSelection()
+            scheduleJenkinsRefresh(delayMs = 0, manual = true)
+        }
+        compareRunSelector.addActionListener {
+            if (updatingRunSelectors) return@addActionListener
+            rememberViewSelection()
+            scheduleJenkinsRefresh(delayMs = 0, manual = true)
+        }
 
         configureLists()
         configureTargetSelector()
@@ -207,6 +272,7 @@ private class MerebJenkinsToolWindowPanel(
         root.addHierarchyListener { event ->
             if ((event.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong()) != 0L) {
                 if (root.isShowing && toolWindow.isVisible) {
+                    scheduleRefresh(delayMs = 0)
                     scheduleJenkinsRefresh(delayMs = 0)
                 } else {
                     jenkinsPollAlarm.cancelAllRequests()
@@ -219,6 +285,17 @@ private class MerebJenkinsToolWindowPanel(
                 scheduleRefresh()
                 scheduleJenkinsRefresh()
             }
+        })
+        project.messageBus.connect(this).subscribe(MerebJenkinsProjectUiStateService.TOPIC, MerebJenkinsUiRequestListener { path, tabName ->
+            currentSelectedPath = path
+            currentImpactPreview = currentAnalysis?.let { MerebJenkinsInsights.buildImpactPreview(it, path, currentJobVariantSelection) }
+            updateFlowAndRelations(currentAnalysis)
+            val tabIndex = (0 until tabs.tabCount).firstOrNull { tabs.getTitleAt(it) == tabName }
+            if (tabIndex != null) {
+                tabs.selectedIndex = tabIndex
+            }
+            scheduleRefresh(delayMs = 0)
+            scheduleJenkinsRefresh(delayMs = 0, manual = true)
         })
         project.messageBus.connect(this).subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
             override fun after(events: List<VFileEvent>) {
@@ -241,6 +318,15 @@ private class MerebJenkinsToolWindowPanel(
                 }
             }
         }, this)
+        EditorFactory.getInstance().eventMulticaster.addCaretListener(object : CaretListener {
+            override fun caretPositionChanged(event: CaretEvent) {
+                val file = FileDocumentManager.getInstance().getFile(event.editor.document) ?: return
+                val target = currentTarget ?: return
+                if (target.isTrackedArtifact(file.path)) {
+                    scheduleRefresh(delayMs = 120)
+                }
+            }
+        }, this)
 
         refreshCurrentFile()
         renderJenkinsDisconnected("Connect to Jenkins to show live build data for this project.")
@@ -250,7 +336,6 @@ private class MerebJenkinsToolWindowPanel(
     private fun buildUi() {
         root.add(buildHeader(), BorderLayout.NORTH)
 
-        val tabs = JBTabbedPane()
         tabs.addTab("Overview", buildOverviewTab())
         tabs.addTab("Jenkins", buildJenkinsTab())
         tabs.addTab("Flow", buildFlowTab())
@@ -319,25 +404,71 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsErrorLabel)
             add(jenkinsDiagnosticsLabel)
         }
-        val selectorRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+        val cards = JPanel(GridLayout(2, 4, 10, 10)).apply {
+            add(jenkinsConnectionCard)
+            add(jenkinsJobCard)
+            add(jenkinsBuildCard)
+            add(jenkinsCompareCard)
+            add(jenkinsQueueCard)
+            add(jenkinsApprovalCard)
+            add(jenkinsSuccessCard)
+            add(StatusCard("Mode").also { it.update("Read-only", "Branch/run compare enabled in Release 1.", Tone.NEUTRAL) })
+        }
+        val primarySelectorRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(jenkinsVariantLabel)
             add(jenkinsVariantSelector)
+            add(jenkinsRunLabel)
+            add(jenkinsRunSelector)
+            add(compareModeToggle)
+        }
+        val compareSelectorRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+            add(compareVariantLabel)
+            add(compareVariantSelector)
+            add(compareRunLabel)
+            add(compareRunSelector)
             add(jenkinsVariantHintLabel)
         }
         val top = JPanel(BorderLayout(0, 8)).apply {
             add(statusStack, BorderLayout.NORTH)
-            add(selectorRow, BorderLayout.SOUTH)
+            add(cards, BorderLayout.CENTER)
+            add(JPanel(BorderLayout(0, 6)).apply {
+                add(primarySelectorRow, BorderLayout.NORTH)
+                add(compareSelectorRow, BorderLayout.SOUTH)
+            }, BorderLayout.SOUTH)
         }
-        val center = JPanel(GridLayout(2, 2, 10, 10)).apply {
-            add(titledPanel("Recent Runs", JBScrollPane(jenkinsRunsList)))
-            add(titledPanel("Stages", JBScrollPane(jenkinsStagesList)))
+
+        val primaryPanel = JPanel(BorderLayout(0, 8)).apply {
+            add(titledPanel("Recent Runs", JBScrollPane(jenkinsRunsList)), BorderLayout.NORTH)
+            add(titledPanel("Stages", JBScrollPane(jenkinsStagesList)), BorderLayout.CENTER)
+        }
+        val comparePanel = JPanel(BorderLayout(0, 8)).apply {
+            add(titledPanel("Compare Runs", JBScrollPane(compareRunsList)), BorderLayout.NORTH)
+            add(titledPanel("Compare Stages", JBScrollPane(compareStagesList)), BorderLayout.CENTER)
+        }
+        val livePanel = JPanel(GridLayout(1, 2, 10, 10)).apply {
+            add(primaryPanel)
+            add(comparePanel)
+        }
+        val supportPanel = JPanel(GridLayout(2, 2, 10, 10)).apply {
             add(titledPanel("Pending Input", JBScrollPane(jenkinsPendingList)))
             add(titledPanel("Artifacts", JBScrollPane(jenkinsArtifactsList)))
+            add(titledPanel("Deployment Timeline", JBScrollPane(timelineList)))
+            add(titledPanel("Drift Findings", JBScrollPane(driftList)))
+        }
+        val excerptPanel = JPanel(BorderLayout(0, 8)).apply {
+            add(stageExcerptLabel, BorderLayout.NORTH)
+            add(JBScrollPane(stageExcerptArea), BorderLayout.CENTER)
+        }
+        val center = JPanel(BorderLayout(0, 10)).apply {
+            add(livePanel, BorderLayout.NORTH)
+            add(supportPanel, BorderLayout.CENTER)
+            add(excerptPanel, BorderLayout.SOUTH)
         }
         val actions = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(connectJenkinsButton)
             add(remapJobButton)
             add(refreshJenkinsButton)
+            add(openLogButton)
             add(openInJenkinsButton)
         }
         add(top, BorderLayout.NORTH)
@@ -347,10 +478,21 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun configureJenkinsVariantSelector() {
         jenkinsVariantSelector.preferredSize = JBUI.size(320, 28)
+        jenkinsRunSelector.preferredSize = JBUI.size(220, 28)
+        compareVariantSelector.preferredSize = JBUI.size(320, 28)
+        compareRunSelector.preferredSize = JBUI.size(220, 28)
         jenkinsVariantLabel.isVisible = false
         jenkinsVariantSelector.isVisible = false
+        jenkinsRunLabel.isVisible = false
+        jenkinsRunSelector.isVisible = false
+        compareVariantLabel.isVisible = false
+        compareVariantSelector.isVisible = false
+        compareRunLabel.isVisible = false
+        compareRunSelector.isVisible = false
+        compareModeToggle.isVisible = false
+        openLogButton.isVisible = false
         jenkinsVariantHintLabel.foreground = JBColor.GRAY
-        jenkinsVariantSelector.renderer = object : ColoredListCellRenderer<MerebJenkinsJobCandidate>() {
+        val variantRenderer = object : ColoredListCellRenderer<MerebJenkinsJobCandidate>() {
             override fun customizeCellRenderer(
                 list: JList<out MerebJenkinsJobCandidate>,
                 value: MerebJenkinsJobCandidate?,
@@ -363,15 +505,31 @@ private class MerebJenkinsToolWindowPanel(
                 append("  ${value.jobDisplayName}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
             }
         }
+        jenkinsVariantSelector.renderer = variantRenderer
+        compareVariantSelector.renderer = variantRenderer
+        val runRenderer = object : ColoredListCellRenderer<MerebJenkinsRunChoice>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsRunChoice>,
+                value: MerebJenkinsRunChoice?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.label, if (value.isLatest) SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES else SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            }
+        }
+        jenkinsRunSelector.renderer = runRenderer
+        compareRunSelector.renderer = runRenderer
     }
 
     private fun buildFlowTab(): JComponent = JPanel(BorderLayout(0, 8)).apply {
-        add(JBLabel("Derived runtime sequence. Double-click a step to jump to the relevant YAML section."), BorderLayout.NORTH)
+        add(flowInfoLabel, BorderLayout.NORTH)
         add(JBScrollPane(flowList), BorderLayout.CENTER)
     }
 
     private fun buildRelationsTab(): JComponent = JPanel(BorderLayout(0, 8)).apply {
-        add(JBLabel("Order lists, environment blocks, and recipe-driven sections are color-coded by relation status."), BorderLayout.NORTH)
+        add(relationsInfoLabel, BorderLayout.NORTH)
         add(JBScrollPane(relationsList), BorderLayout.CENTER)
     }
 
@@ -477,6 +635,8 @@ private class MerebJenkinsToolWindowPanel(
                 append("  ${value.status.lowercase().replace('_', ' ')}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
             }
         }
+        compareRunsList.cellRenderer = jenkinsRunsList.cellRenderer
+        compareStagesList.cellRenderer = jenkinsStagesList.cellRenderer
 
         jenkinsPendingList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsPendingInput>() {
             override fun customizeCellRenderer(
@@ -501,6 +661,34 @@ private class MerebJenkinsToolWindowPanel(
             ) {
                 if (value == null) return
                 append(value.label, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            }
+        }
+        driftList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsDriftFinding>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsDriftFinding>,
+                value: MerebJenkinsDriftFinding?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append("[${value.kind.name.lowercase()}] ", SimpleTextAttributes.GRAYED_ATTRIBUTES)
+                append(value.message, attrsForDrift(value.kind))
+                value.detail?.let { append("  $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
+            }
+        }
+        timelineList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsDeploymentTimelineEntry>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsDeploymentTimelineEntry>,
+                value: MerebJenkinsDeploymentTimelineEntry?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.environment, attrsForStageMapping(value.status))
+                value.runName?.let { append("  $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
+                value.detail?.let { append("  $it", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES) }
             }
         }
 
@@ -532,9 +720,24 @@ private class MerebJenkinsToolWindowPanel(
             val run = jenkinsRunsList.selectedValue ?: return@doubleClickListener
             browseJenkinsUrl(run.url, "No Jenkins run URL is available for the selected build.")
         })
+        compareRunsList.addMouseListener(doubleClickListener {
+            val run = compareRunsList.selectedValue ?: return@doubleClickListener
+            browseJenkinsUrl(run.url, "No Jenkins run URL is available for the selected build.")
+        })
+        jenkinsStagesList.addMouseListener(doubleClickListener {
+            loadConsoleExcerpt(primary = true)
+        })
+        compareStagesList.addMouseListener(doubleClickListener {
+            loadConsoleExcerpt(primary = false)
+        })
         jenkinsArtifactsList.addMouseListener(doubleClickListener {
             val artifact = jenkinsArtifactsList.selectedValue ?: return@doubleClickListener
             browseJenkinsUrl(artifact.url, "No Jenkins artifact URL is available for the selected artifact.")
+        })
+        driftList.addMouseListener(doubleClickListener {
+            val finding = driftList.selectedValue ?: return@doubleClickListener
+            currentAnalysis?.let { navigate(finding.path, it) }
+            uiStateService.requestFocus(finding.path, "Jenkins")
         })
     }
 
@@ -581,16 +784,18 @@ private class MerebJenkinsToolWindowPanel(
         val text = document?.text ?: selectedConfig.inputStream.bufferedReader().use { it.readText() }
         val analysis = analyzer.analyzeDetailed(text, selectedConfig.path)
         currentAnalysis = analysis
+        currentSelectedPath = resolveSelectedConfigPath(selectedConfig)
+        currentImpactPreview = MerebJenkinsInsights.buildImpactPreview(analysis, currentSelectedPath, currentJobVariantSelection)
 
         titleLabel.text = analysis.summary.explicitRecipe?.let { "Mereb Jenkins: $it" } ?: "Mereb Jenkins: ${analysis.summary.resolvedRecipe}"
         subtitleLabel.text = buildSubtitle(target, analysis)
 
         refill(findingsModel, analysis.findings)
         refill(sectionsModel, analysis.summary.sections)
-        refill(flowModel, analysis.summary.flowSteps)
-        refill(relationsModel, analysis.summary.relations)
+        updateFlowAndRelations(analysis)
         updateCards(analysis)
         updateButtons()
+        consumeRequestedTab()
         scheduleJenkinsRefresh(delayMs = 0)
     }
 
@@ -662,39 +867,110 @@ private class MerebJenkinsToolWindowPanel(
                 }
                 is MerebJenkinsApiResult.Success -> Unit
             }
-            val visibleJobsResult = client.fetchVisibleJobs()
-            val visibleJobs = when (visibleJobsResult) {
-                is MerebJenkinsApiResult.Success -> visibleJobsResult.value
-                is MerebJenkinsApiResult.Failure -> {
-                    recordConnectionProblem(visibleJobsResult.problem)
-                    application.invokeLater({
-                        if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
-                        currentJenkinsProblem = visibleJobsResult.problem
-                        renderJenkinsProblem(visibleJobsResult.problem, preserveLiveData = shouldPreserveLiveData(target))
-                    }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
-                    return@executeOnPooledThread
+            var visibleJobs: List<MerebJenkinsJobCandidate>? = null
+            val preloadedSummaries = linkedMapOf<String, MerebJenkinsJobSummary>()
+            val existingMapping = if (!forceRemap) jenkinsStateService.getJobMapping(target.projectRootPath) else null
+            val resolution = if (existingMapping != null) {
+                when (val summaryResult = client.fetchJobSummary(existingMapping.jobPath)) {
+                    is MerebJenkinsApiResult.Success -> {
+                        preloadedSummaries[existingMapping.jobPath] = summaryResult.value
+                        visibleJobs = when (val familyResult = client.fetchJobFamilyCandidates(existingMapping.jobPath, summaryResult.value)) {
+                            is MerebJenkinsApiResult.Success -> familyResult.value
+                            is MerebJenkinsApiResult.Failure -> listOf(
+                                MerebJenkinsJobCandidate(
+                                    jobPath = existingMapping.jobPath,
+                                    jobDisplayName = existingMapping.jobDisplayName.ifBlank { summaryResult.value.displayName },
+                                    leafName = existingMapping.jobPath.substringAfterLast('/'),
+                                    url = summaryResult.value.url,
+                                    color = summaryResult.value.color,
+                                    container = summaryResult.value.jobClass?.contains("WorkflowMultiBranchProject") == true,
+                                    jobClass = summaryResult.value.jobClass,
+                                )
+                            )
+                        }
+                        MerebJenkinsJobResolution.Resolved(existingMapping, autoSelected = false)
+                    }
+                    is MerebJenkinsApiResult.Failure -> {
+                        if (summaryResult.problem.kind == MerebJenkinsApiProblemKind.NOT_FOUND) {
+                            jenkinsStateService.clearJobMapping(target.projectRootPath)
+                            null
+                        } else {
+                            recordConnectionProblem(summaryResult.problem)
+                            application.invokeLater({
+                                if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                                currentJenkinsProblem = summaryResult.problem
+                                renderJenkinsProblem(summaryResult.problem, preserveLiveData = shouldPreserveLiveData(target))
+                            }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                            return@executeOnPooledThread
+                        }
+                    }
                 }
-            }
-            when (
-                val resolution = MerebJenkinsJobResolver.resolveWithVisibleJobs(
+            } else {
+                null
+            } ?: run {
+                val visibleJobsResult = client.fetchVisibleJobs()
+                visibleJobs = when (visibleJobsResult) {
+                    is MerebJenkinsApiResult.Success -> visibleJobsResult.value
+                    is MerebJenkinsApiResult.Failure -> {
+                        recordConnectionProblem(visibleJobsResult.problem)
+                        application.invokeLater({
+                            if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                            currentJenkinsProblem = visibleJobsResult.problem
+                            renderJenkinsProblem(visibleJobsResult.problem, preserveLiveData = shouldPreserveLiveData(target))
+                        }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                        return@executeOnPooledThread
+                    }
+                }
+                MerebJenkinsJobResolver.resolveWithVisibleJobs(
                     stateService = jenkinsStateService,
                     client = client,
                     workspaceTarget = target,
                     workspaceBasePath = project.basePath,
-                    visibleJobs = visibleJobs,
+                    visibleJobs = visibleJobs.orEmpty(),
                     forceRemap = forceRemap,
                 )
-            ) {
+            }
+            when (resolution) {
                 is MerebJenkinsJobResolution.Resolved -> {
                     val branchName = MerebJenkinsGitSupport.currentBranch(target.projectRootPath)
+                    val rememberedView = jenkinsStateService.getViewSelection(target.projectRootPath)
                     val variantSelection = MerebJenkinsJobResolver.resolveVariantSelection(
                         mapping = resolution.mapping,
-                        visibleJobs = visibleJobs,
+                        visibleJobs = visibleJobs.orEmpty(),
                         branchName = branchName,
-                        manuallySelectedJobPath = manualJobVariantSelections[target.projectRootPath],
+                        manuallySelectedJobPath = manualJobVariantSelections[target.projectRootPath] ?: rememberedView?.primaryVariantJobPath,
                     )
-                    when (val live = client.fetchLiveJobData(variantSelection.selected.jobPath)) {
+                    val compareEnabled = rememberedView?.compareEnabled == true
+                    val primaryRunId = rememberedView?.primaryRunId
+                    val compareRunId = rememberedView?.compareRunId
+                    val compareCandidate = if (compareEnabled) {
+                        MerebJenkinsJobResolver.selectCompareCandidate(
+                            variantSelection.candidates,
+                            variantSelection.selected,
+                            preferredJobPath = rememberedView?.compareVariantJobPath,
+                        )
+                    } else {
+                        null
+                    }
+                    val selectedSummary = preloadedSummaries[variantSelection.selected.jobPath]
+                    when (val live = client.fetchLiveJobData(variantSelection.selected.jobPath, primaryRunId, selectedSummary)) {
                         is MerebJenkinsApiResult.Success -> {
+                            val compareLive = compareCandidate?.let { candidate ->
+                                when (val result = client.fetchLiveJobData(candidate.jobPath, compareRunId)) {
+                                    is MerebJenkinsApiResult.Success -> result.value
+                                    is MerebJenkinsApiResult.Failure -> null
+                                }
+                            }
+                            val compareContext = MerebJenkinsCompareContext(compareEnabled, compareCandidate, compareLive)
+                            val analysis = currentAnalysis
+                            val stageMappings = analysis?.let { MerebJenkinsInsights.buildStageMappings(it, live.value) }.orEmpty()
+                            val driftFindings = analysis?.let {
+                                MerebJenkinsInsights.buildDriftFindings(it, branchName, variantSelection, live.value, stageMappings)
+                            }.orEmpty()
+                            val deploymentTimeline = analysis?.let { MerebJenkinsInsights.buildDeploymentTimeline(it, live.value.runs) }.orEmpty()
+                            val impactPreview = analysis?.let {
+                                MerebJenkinsInsights.buildImpactPreview(it, currentSelectedPath, variantSelection)
+                            }
                             jenkinsStateService.recordConnectionStatus(MerebJenkinsConnectionStatus.CONNECTED, null, System.currentTimeMillis())
                             application.invokeLater({
                                 if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
@@ -702,8 +978,16 @@ private class MerebJenkinsToolWindowPanel(
                                 currentJobMapping = resolution.mapping
                                 currentJobVariantSelection = variantSelection
                                 currentLiveData = live.value
+                                currentCompareContext = compareContext
+                                currentStageMappings = stageMappings
+                                currentDriftFindings = driftFindings
+                                currentDeploymentTimeline = deploymentTimeline
+                                currentImpactPreview = impactPreview
                                 currentJenkinsProblem = null
-                                renderJenkinsLive(resolution.mapping, variantSelection, live.value, resolution.autoSelected)
+                                currentConsoleExcerpt = null
+                                rememberViewSelection()
+                                updateFlowAndRelations(analysis)
+                                renderJenkinsLive(resolution.mapping, variantSelection, live.value, compareContext, resolution.autoSelected)
                                 scheduleNextJenkinsPoll()
                             }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
                         }
@@ -720,6 +1004,7 @@ private class MerebJenkinsToolWindowPanel(
                                     if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
                                     currentJobMapping = resolution.mapping
                                     currentJobVariantSelection = variantSelection
+                                    currentCompareContext = null
                                     currentJenkinsProblem = live.problem
                                     renderJenkinsProblem(live.problem, preserveLiveData = shouldPreserveLiveData(target))
                                 }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
@@ -779,7 +1064,13 @@ private class MerebJenkinsToolWindowPanel(
         currentJobMapping = null
         currentJobVariantSelection = null
         currentLiveData = null
+        currentCompareContext = null
         currentJenkinsProblem = null
+        currentStageMappings = emptyList()
+        currentDriftFindings = emptyList()
+        currentDeploymentTimeline = emptyList()
+        currentImpactPreview = null
+        currentConsoleExcerpt = null
         clearJenkinsModels()
         updateJobVariantSelector(null)
         val snapshot = jenkinsStateService.snapshot()
@@ -788,6 +1079,8 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsRefreshLabel.text = "Last refresh: never"
         jenkinsErrorLabel.text = ""
         jenkinsDiagnosticsLabel.text = ""
+        stageExcerptLabel.text = "Select a Jenkins stage to inspect a recent console excerpt."
+        stageExcerptArea.text = ""
         jenkinsConnectionCard.update(
             "Disconnected",
             snapshot.baseUrl.ifBlank { "Configure Jenkins" },
@@ -795,6 +1088,11 @@ private class MerebJenkinsToolWindowPanel(
         )
         jenkinsJobCard.update("Unmapped", "No Jenkins job is selected for this project.", Tone.NEUTRAL)
         jenkinsBuildCard.update("No data", "Connect Jenkins to load recent runs and stages.", Tone.NEUTRAL)
+        jenkinsQueueCard.update("Idle", "No queue information yet.", Tone.NEUTRAL)
+        jenkinsApprovalCard.update("None", "No live approval state.", Tone.NEUTRAL)
+        jenkinsSuccessCard.update("None", "No recent successful build.", Tone.NEUTRAL)
+        jenkinsCompareCard.update("Off", "Compare mode is disabled.", Tone.NEUTRAL)
+        updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
 
@@ -802,6 +1100,7 @@ private class MerebJenkinsToolWindowPanel(
         currentJobMapping = null
         currentJobVariantSelection = null
         currentLiveData = null
+        currentCompareContext = null
         clearJenkinsModels()
         updateJobVariantSelector(null)
         jenkinsStatusLabel.text = "Multiple Jenkins jobs matched this project."
@@ -809,9 +1108,16 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsRefreshLabel.text = "Last refresh: waiting for job selection"
         jenkinsErrorLabel.text = "Use Remap Job to select the Jenkins job that should power live data."
         jenkinsDiagnosticsLabel.text = ""
+        stageExcerptLabel.text = "Select a Jenkins stage to inspect a recent console excerpt."
+        stageExcerptArea.text = ""
         jenkinsConnectionCard.update("Connected", "Jenkins connection is ready.", Tone.SUCCESS)
         jenkinsJobCard.update("Selection required", "$matchCount candidate jobs found.", Tone.WARNING)
         jenkinsBuildCard.update("No data", "Live data will load once a job is selected.", Tone.NEUTRAL)
+        jenkinsQueueCard.update("Pending", "Choose the Jenkins job to inspect live queue data.", Tone.WARNING)
+        jenkinsApprovalCard.update("None", "No live approval state.", Tone.NEUTRAL)
+        jenkinsSuccessCard.update("None", "No successful build selected.", Tone.NEUTRAL)
+        jenkinsCompareCard.update("Off", "Compare mode waits for a concrete job selection.", Tone.NEUTRAL)
+        updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
 
@@ -819,6 +1125,7 @@ private class MerebJenkinsToolWindowPanel(
         currentJobMapping = null
         currentJobVariantSelection = null
         currentLiveData = null
+        currentCompareContext = null
         clearJenkinsModels()
         updateJobVariantSelector(null)
         jenkinsStatusLabel.text = "No Jenkins job matched the current project."
@@ -826,9 +1133,16 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(System.currentTimeMillis())}"
         jenkinsErrorLabel.text = "Use Remap Job after creating the Jenkins job or adjust the job naming."
         jenkinsDiagnosticsLabel.text = ""
+        stageExcerptLabel.text = "Select a Jenkins stage to inspect a recent console excerpt."
+        stageExcerptArea.text = ""
         jenkinsConnectionCard.update("Connected", "Jenkins connection is ready.", Tone.SUCCESS)
         jenkinsJobCard.update("No match", searchedLabels.joinToString(", ").ifBlank { "No matching job" }, Tone.WARNING)
         jenkinsBuildCard.update("No data", "No Jenkins job is mapped for this project.", Tone.NEUTRAL)
+        jenkinsQueueCard.update("Unknown", "The plugin could not resolve a Jenkins job family.", Tone.WARNING)
+        jenkinsApprovalCard.update("None", "No live approval state.", Tone.NEUTRAL)
+        jenkinsSuccessCard.update("None", "No successful build selected.", Tone.NEUTRAL)
+        jenkinsCompareCard.update("Off", "Compare mode is unavailable until a job is matched.", Tone.NEUTRAL)
+        updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
 
@@ -837,12 +1151,17 @@ private class MerebJenkinsToolWindowPanel(
         val staleLiveData = if (preserveLiveData) currentLiveData else null
         if (staleLiveData == null) {
             currentLiveData = null
+            currentCompareContext = null
             clearJenkinsModels()
         } else {
             refill(jenkinsRunsModel, staleLiveData.runs)
             refill(jenkinsStagesModel, staleLiveData.selectedRun?.stages.orEmpty())
             refill(jenkinsPendingModel, staleLiveData.pendingInputs)
             refill(jenkinsArtifactsModel, staleLiveData.artifacts)
+            refill(compareRunsModel, currentCompareContext?.liveData?.runs.orEmpty())
+            refill(compareStagesModel, currentCompareContext?.liveData?.selectedRun?.stages.orEmpty())
+            refill(driftModel, currentDriftFindings)
+            refill(timelineModel, currentDeploymentTimeline)
         }
         updateJobVariantSelector(currentJobVariantSelection)
         jenkinsStatusLabel.text = when (problem.kind) {
@@ -876,6 +1195,26 @@ private class MerebJenkinsToolWindowPanel(
             if (staleLiveData != null) "Showing last known good Jenkins data." else (problem.message ?: "Unable to load Jenkins build data."),
             if (staleLiveData != null) Tone.WARNING else Tone.ERROR
         )
+        jenkinsQueueCard.update(
+            if (staleLiveData?.summary?.queueState?.inQueue == true) "Queued" else "Unknown",
+            staleLiveData?.summary?.queueState?.reason ?: "Queue details are unavailable while Jenkins is failing.",
+            if (staleLiveData?.summary?.queueState?.inQueue == true) Tone.WARNING else Tone.NEUTRAL
+        )
+        jenkinsApprovalCard.update(
+            if (staleLiveData?.pendingInputs?.isNotEmpty() == true) "${staleLiveData.pendingInputs.size} waiting" else "None",
+            staleLiveData?.pendingInputs?.firstOrNull()?.message ?: "No pending input details.",
+            if (staleLiveData?.pendingInputs?.isNotEmpty() == true) Tone.WARNING else Tone.NEUTRAL
+        )
+        jenkinsSuccessCard.update(
+            staleLiveData?.summary?.lastSuccessfulBuildNumber?.let { "#$it" } ?: "Unavailable",
+            staleLiveData?.summary?.lastSuccessfulBuildUrl ?: "No last successful build URL available.",
+            if (staleLiveData?.summary?.lastSuccessfulBuildNumber != null) Tone.SUCCESS else Tone.NEUTRAL
+        )
+        jenkinsCompareCard.update(
+            if (currentCompareContext?.enabled == true) "Stale" else "Off",
+            currentCompareContext?.selection?.jobDisplayName ?: "Compare mode is disabled.",
+            if (currentCompareContext?.enabled == true) Tone.WARNING else Tone.NEUTRAL
+        )
         updateButtons()
     }
 
@@ -883,6 +1222,7 @@ private class MerebJenkinsToolWindowPanel(
         mapping: MerebJenkinsJobMapping,
         variantSelection: MerebJenkinsJobVariantSelection,
         liveData: MerebJenkinsLiveJobData,
+        compareContext: MerebJenkinsCompareContext,
         autoSelected: Boolean,
     ) {
         val snapshot = jenkinsStateService.snapshot()
@@ -891,15 +1231,21 @@ private class MerebJenkinsToolWindowPanel(
         refill(jenkinsStagesModel, liveData.selectedRun?.stages.orEmpty())
         refill(jenkinsPendingModel, liveData.pendingInputs)
         refill(jenkinsArtifactsModel, liveData.artifacts)
+        refill(compareRunsModel, compareContext.liveData?.runs.orEmpty())
+        refill(compareStagesModel, compareContext.liveData?.selectedRun?.stages.orEmpty())
+        refill(driftModel, currentDriftFindings)
+        refill(timelineModel, currentDeploymentTimeline)
         jenkinsStatusLabel.text = buildJenkinsStatusMessage(autoSelected, variantSelection)
         jenkinsJobLabel.text = "Viewing job: ${variantSelection.selected.jobDisplayName} (${variantSelection.selected.jobPath})"
         jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(liveData.refreshedAt)}"
-        jenkinsErrorLabel.text = if (liveData.pipelineAvailable) {
+        jenkinsErrorLabel.text = if (liveData.summary.jobClass?.contains("WorkflowMultiBranchProject") == true && liveData.summary.branchCount == 0) {
+            "The matching multibranch Jenkins job exists, but it has no indexed branch jobs yet."
+        } else if (liveData.pipelineAvailable) {
             if (liveData.pendingInputs.isNotEmpty()) "${liveData.pendingInputs.size} pending input action${if (liveData.pendingInputs.size == 1) "" else "s"} detected." else ""
         } else {
             "Pipeline stage details are unavailable for this Jenkins job."
         }
-        jenkinsDiagnosticsLabel.text = ""
+        jenkinsDiagnosticsLabel.text = buildJenkinsDiagnosticsText(snapshot, currentJenkinsProblem)
         jenkinsConnectionCard.update(
             "Connected",
             "${snapshot.username} @ ${snapshot.baseUrl}",
@@ -917,6 +1263,42 @@ private class MerebJenkinsToolWindowPanel(
             ?: liveData.summary.lastBuildUrl
             ?: "No Jenkins run URL available."
         jenkinsBuildCard.update(buildLabel, buildDetail, toneForBuildStatus(liveData.selectedRun?.status))
+        val queueState = liveData.summary.queueState
+        jenkinsQueueCard.update(
+            when {
+                queueState?.inQueue == true -> "Queued"
+                liveData.selectedRun?.running == true -> "Running"
+                else -> "Idle"
+            },
+            queueState?.reason ?: liveData.selectedRun?.status ?: "No queue or running state reported.",
+            when {
+                queueState?.inQueue == true -> Tone.WARNING
+                liveData.selectedRun?.running == true -> Tone.INFO
+                else -> Tone.NEUTRAL
+            }
+        )
+        jenkinsApprovalCard.update(
+            if (liveData.pendingInputs.isNotEmpty()) "${liveData.pendingInputs.size} waiting" else "None",
+            liveData.pendingInputs.firstOrNull()?.message ?: "No pending approval input.",
+            if (liveData.pendingInputs.isNotEmpty()) Tone.WARNING else Tone.NEUTRAL
+        )
+        jenkinsSuccessCard.update(
+            liveData.summary.lastSuccessfulBuildNumber?.let { "#$it" } ?: "Unavailable",
+            liveData.summary.lastSuccessfulBuildUrl ?: "No successful build URL reported.",
+            if (liveData.summary.lastSuccessfulBuildNumber != null) Tone.SUCCESS else Tone.NEUTRAL
+        )
+        jenkinsCompareCard.update(
+            if (compareContext.enabled) compareContext.selection?.leafName ?: "On" else "Off",
+            compareContext.liveData?.selectedRun?.let { "${it.name} ${it.status}" }
+                ?: compareContext.selection?.jobDisplayName
+                ?: "Compare mode is disabled.",
+            if (compareContext.enabled) Tone.INFO else Tone.NEUTRAL
+        )
+        stageExcerptLabel.text = currentConsoleExcerpt?.let {
+            "Showing ${if (it.anchored) "anchored" else "tail"} console excerpt for ${it.stageName ?: "the selected run"}."
+        } ?: "Select a Jenkins stage to inspect a recent console excerpt."
+        stageExcerptArea.text = currentConsoleExcerpt?.excerpt.orEmpty()
+        updateFlowAndRelations(currentAnalysis)
         updateButtons()
     }
 
@@ -925,6 +1307,10 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsStagesModel.clear()
         jenkinsPendingModel.clear()
         jenkinsArtifactsModel.clear()
+        compareRunsModel.clear()
+        compareStagesModel.clear()
+        driftModel.clear()
+        timelineModel.clear()
     }
 
     private fun openInJenkins() {
@@ -937,6 +1323,27 @@ private class MerebJenkinsToolWindowPanel(
             ?: mapping?.let { buildJenkinsJobUrl(jenkinsStateService.snapshot().baseUrl, it.jobPath) }
             ?: return
         browseJenkinsUrl(url, "No Jenkins URL is available for the current selection.")
+    }
+
+    private fun openSelectedLog() {
+        val url = currentConsoleExcerpt?.logUrl
+            ?: currentLiveData?.selectedRun?.url?.let { "${it.trimEnd('/')}/console" }
+            ?: currentCompareContext?.liveData?.selectedRun?.url?.let { "${it.trimEnd('/')}/console" }
+        browseJenkinsUrl(url, "No Jenkins console log is available for the current selection.")
+    }
+
+    private fun rememberViewSelection() {
+        val target = currentTarget ?: return
+        jenkinsStateService.rememberViewSelection(
+            MerebJenkinsViewSelection(
+                projectRootPath = target.projectRootPath,
+                compareEnabled = compareModeToggle.isSelected,
+                primaryVariantJobPath = (jenkinsVariantSelector.selectedItem as? MerebJenkinsJobCandidate)?.jobPath ?: currentJobVariantSelection?.selected?.jobPath,
+                compareVariantJobPath = (compareVariantSelector.selectedItem as? MerebJenkinsJobCandidate)?.jobPath ?: currentCompareContext?.selection?.jobPath,
+                primaryRunId = (jenkinsRunSelector.selectedItem as? MerebJenkinsRunChoice)?.id,
+                compareRunId = (compareRunSelector.selectedItem as? MerebJenkinsRunChoice)?.id,
+            )
+        )
     }
 
     private fun scheduleJenkinsRefresh(
@@ -998,8 +1405,14 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun buildJenkinsDiagnosticsText(
         snapshot: MerebJenkinsConnectionSnapshot,
-        problem: MerebJenkinsApiProblem,
+        problem: MerebJenkinsApiProblem?,
     ): String {
+        if (problem == null) {
+            return listOfNotNull(
+                snapshot.baseUrl.ifBlank { null }?.let { "Base URL: $it" },
+                currentJobMapping?.jobPath?.let { "Job: $it" },
+            ).joinToString("  •  ")
+        }
         val parts = listOfNotNull(
             snapshot.baseUrl.ifBlank { null }?.let { "Base URL: $it" },
             problem.requestUrl?.let { "Request: $it" },
@@ -1007,6 +1420,44 @@ private class MerebJenkinsToolWindowPanel(
             problem.redirectRelation?.let { "Redirect type: $it" },
         )
         return parts.joinToString("  •  ")
+    }
+
+    private fun loadConsoleExcerpt(primary: Boolean) {
+        val target = currentTarget ?: return
+        val snapshot = jenkinsStateService.snapshot()
+        val token = jenkinsStateService.resolveToken(snapshot.baseUrl, snapshot.username) ?: return
+        val liveData = if (primary) currentLiveData else currentCompareContext?.liveData
+        val stage = if (primary) jenkinsStagesList.selectedValue else compareStagesList.selectedValue
+        val run = liveData?.selectedRun ?: return
+        val stageName = stage?.name
+        stageExcerptLabel.text = "Loading console excerpt…"
+        stageExcerptArea.text = ""
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val client = MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token)
+            val excerpt = client.fetchConsoleExcerpt(
+                jobPath = (if (primary) currentJobVariantSelection?.selected else currentCompareContext?.selection)?.jobPath
+                    ?: currentJobMapping?.jobPath
+                    ?: return@executeOnPooledThread,
+                runId = run.id,
+                stageName = stageName,
+            )
+            ApplicationManager.getApplication().invokeLater({
+                if (disposed || project.isDisposed || currentTarget?.projectRootPath != target.projectRootPath) return@invokeLater
+                when (excerpt) {
+                    is MerebJenkinsApiResult.Success -> {
+                        currentConsoleExcerpt = excerpt.value
+                        stageExcerptLabel.text =
+                            "Showing ${if (excerpt.value.anchored) "anchored" else "tail"} console excerpt for ${excerpt.value.stageName ?: run.name}."
+                        stageExcerptArea.text = excerpt.value.excerpt
+                    }
+                    is MerebJenkinsApiResult.Failure -> {
+                        stageExcerptLabel.text = excerpt.problem.message ?: "Unable to load Jenkins console excerpt."
+                        stageExcerptArea.text = ""
+                    }
+                }
+                updateButtons()
+            }, ModalityState.any(), Condition<Any?> { disposed || project.isDisposed })
+        }
     }
 
     private fun applySafeFixes() {
@@ -1046,6 +1497,64 @@ private class MerebJenkinsToolWindowPanel(
         }
     }
 
+    private fun resolveSelectedConfigPath(configFile: VirtualFile): MerebJenkinsPath? {
+        uiStateService.consumeRequestedPath()?.let { return it }
+        val editor = FileEditorManager.getInstance(project).selectedTextEditor ?: return null
+        val editorFile = FileDocumentManager.getInstance().getFile(editor.document) ?: return null
+        if (editorFile.path != configFile.path) return null
+        return ApplicationManager.getApplication().runReadAction<MerebJenkinsPath?> {
+            val psiFile = PsiManager.getInstance(project).findFile(editorFile) ?: return@runReadAction null
+            val element = psiFile.findElementAt(editor.caretModel.offset) ?: return@runReadAction null
+            MerebJenkinsPsiUtils.pathForElement(element)
+        }
+    }
+
+    private fun consumeRequestedTab() {
+        val requested = uiStateService.consumeRequestedTabName() ?: return
+        val index = (0 until tabs.tabCount).firstOrNull { tabs.getTitleAt(it) == requested } ?: return
+        tabs.selectedIndex = index
+    }
+
+    private fun updateFlowAndRelations(analysis: MerebJenkinsAnalysisResult?) {
+        if (analysis == null) {
+            refill(flowModel, emptyList())
+            refill(relationsModel, emptyList())
+            flowInfoLabel.text = "Derived runtime sequence. Double-click a step to jump to the relevant YAML section."
+            relationsInfoLabel.text = "Order lists, environment blocks, and recipe-driven sections are color-coded by relation status."
+            return
+        }
+        val stageMappingsByPath = currentStageMappings
+            .filter { it.configPath != null }
+            .associateBy { it.configPath.toString() }
+        val flowSteps = analysis.summary.flowSteps.map { step ->
+            val mapping = step.path?.toString()?.let(stageMappingsByPath::get)
+            if (mapping == null) step else step.copy(status = relationStatusForMapping(mapping.status), detail = mapping.detail)
+        }
+        val relationEntries = buildList {
+            addAll(analysis.summary.relations)
+            addAll(
+                currentStageMappings.map { mapping ->
+                    MerebJenkinsRelation(
+                        id = "jenkins-${mapping.id}",
+                        group = "Jenkins",
+                        label = mapping.label,
+                        sourcePath = mapping.configPath,
+                        targetPath = mapping.configPath,
+                        status = relationStatusForMapping(mapping.status),
+                        detail = mapping.detail,
+                    )
+                }
+            )
+        }
+        refill(flowModel, flowSteps)
+        refill(relationsModel, relationEntries)
+        flowInfoLabel.text = currentImpactPreview?.let { "${it.title}: ${it.details.joinToString(" • ")}" }
+            ?: "Derived runtime sequence. Double-click a step to jump to the relevant YAML section."
+        val relationSummary = currentDriftFindings.takeIf { it.isNotEmpty() }?.joinToString(" • ") { it.message }
+        relationsInfoLabel.text = relationSummary
+            ?: "Order lists, environment blocks, and recipe-driven sections are color-coded by relation status."
+    }
+
     private fun updateCards(analysis: MerebJenkinsAnalysisResult?) {
         if (analysis == null) {
             listOf(recipeCard, imageCard, releaseCard, relationCard, noticeCard, fixCard, jenkinsConnectionCard, jenkinsJobCard, jenkinsBuildCard).forEach {
@@ -1071,10 +1580,11 @@ private class MerebJenkinsToolWindowPanel(
         )
         relationCard.update(
             "${summary.relations.size} links",
-            "${summary.referencedButMissing.size} missing, ${summary.definedButUnused.size} unused",
+            "${summary.referencedButMissing.size} missing, ${summary.definedButUnused.size} unused, ${currentDriftFindings.size} drift",
             when {
                 summary.referencedButMissing.isNotEmpty() -> Tone.ERROR
                 summary.definedButUnused.isNotEmpty() -> Tone.WARNING
+                currentDriftFindings.isNotEmpty() -> Tone.WARNING
                 else -> Tone.INFO
             }
         )
@@ -1107,6 +1617,7 @@ private class MerebJenkinsToolWindowPanel(
         remapJobButton.isEnabled = snapshot.isConfigured && currentTarget != null
         refreshJenkinsButton.isEnabled = snapshot.isConfigured && currentTarget != null
         openInJenkinsButton.isEnabled = currentLiveData != null || currentJobVariantSelection != null || currentJobMapping != null
+        openLogButton.isEnabled = currentConsoleExcerpt != null || currentLiveData?.selectedRun != null || currentCompareContext?.liveData?.selectedRun != null
     }
 
     private fun buildSubtitle(target: MerebJenkinsWorkspaceTarget, analysis: MerebJenkinsAnalysisResult): String {
@@ -1233,6 +1744,26 @@ private class MerebJenkinsToolWindowPanel(
         MerebJenkinsRelationStatus.IGNORED, MerebJenkinsRelationStatus.INACTIVE -> SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, JBColor.GRAY)
     }
 
+    private fun attrsForStageMapping(status: MerebJenkinsStageMappingStatus): SimpleTextAttributes = when (status) {
+        MerebJenkinsStageMappingStatus.MATCHED -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, toneColor(Tone.SUCCESS))
+        MerebJenkinsStageMappingStatus.MISSING -> SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, toneColor(Tone.ERROR))
+        MerebJenkinsStageMappingStatus.EXTRA -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, toneColor(Tone.WARNING))
+        MerebJenkinsStageMappingStatus.AMBIGUOUS -> SimpleTextAttributes(SimpleTextAttributes.STYLE_ITALIC, toneColor(Tone.WARNING))
+    }
+
+    private fun attrsForDrift(kind: MerebJenkinsDriftKind): SimpleTextAttributes = when (kind) {
+        MerebJenkinsDriftKind.LOCAL -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, toneColor(Tone.WARNING))
+        MerebJenkinsDriftKind.RUNTIME -> SimpleTextAttributes(SimpleTextAttributes.STYLE_BOLD, toneColor(Tone.ERROR))
+        MerebJenkinsDriftKind.BRANCH -> SimpleTextAttributes(SimpleTextAttributes.STYLE_PLAIN, toneColor(Tone.INFO))
+    }
+
+    private fun relationStatusForMapping(status: MerebJenkinsStageMappingStatus): MerebJenkinsRelationStatus = when (status) {
+        MerebJenkinsStageMappingStatus.MATCHED -> MerebJenkinsRelationStatus.OK
+        MerebJenkinsStageMappingStatus.MISSING -> MerebJenkinsRelationStatus.MISSING
+        MerebJenkinsStageMappingStatus.EXTRA -> MerebJenkinsRelationStatus.UNUSED
+        MerebJenkinsStageMappingStatus.AMBIGUOUS -> MerebJenkinsRelationStatus.INACTIVE
+    }
+
     private fun toneForRecipe(recipe: String): Tone = when (recipe) {
         "service" -> Tone.INFO
         "package" -> Tone.SUCCESS
@@ -1252,12 +1783,24 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun updateJobVariantSelector(variantSelection: MerebJenkinsJobVariantSelection?) {
         updatingVariantSelector = true
+        updatingRunSelectors = true
         try {
             currentJobVariantSelection = variantSelection
             jenkinsVariantSelector.removeAllItems()
+            compareVariantSelector.removeAllItems()
+            jenkinsRunSelector.removeAllItems()
+            compareRunSelector.removeAllItems()
             if (variantSelection == null) {
                 jenkinsVariantLabel.isVisible = false
                 jenkinsVariantSelector.isVisible = false
+                jenkinsRunLabel.isVisible = false
+                jenkinsRunSelector.isVisible = false
+                compareModeToggle.isVisible = false
+                compareVariantLabel.isVisible = false
+                compareVariantSelector.isVisible = false
+                compareRunLabel.isVisible = false
+                compareRunSelector.isVisible = false
+                openLogButton.isVisible = false
                 jenkinsVariantHintLabel.text = "Defaulting to the current branch when possible."
                 return
             }
@@ -1266,6 +1809,24 @@ private class MerebJenkinsToolWindowPanel(
             val hasChoices = variantSelection.candidates.size > 1
             jenkinsVariantLabel.isVisible = hasChoices
             jenkinsVariantSelector.isVisible = hasChoices
+            val primaryChoices = MerebJenkinsJobResolver.runChoices(currentLiveData)
+            primaryChoices.forEach(jenkinsRunSelector::addItem)
+            jenkinsRunSelector.selectedItem = primaryChoices.firstOrNull { it.id == currentLiveData?.selectedRun?.id } ?: primaryChoices.firstOrNull()
+            jenkinsRunLabel.isVisible = currentLiveData != null
+            jenkinsRunSelector.isVisible = currentLiveData != null
+            compareModeToggle.isVisible = hasChoices
+            compareModeToggle.isSelected = currentCompareContext?.enabled == true
+            variantSelection.candidates.forEach(compareVariantSelector::addItem)
+            compareVariantSelector.selectedItem = currentCompareContext?.selection
+                ?: MerebJenkinsJobResolver.selectCompareCandidate(variantSelection.candidates, variantSelection.selected)
+            val compareChoices = MerebJenkinsJobResolver.runChoices(currentCompareContext?.liveData)
+            compareChoices.forEach(compareRunSelector::addItem)
+            compareRunSelector.selectedItem = compareChoices.firstOrNull { it.id == currentCompareContext?.liveData?.selectedRun?.id } ?: compareChoices.firstOrNull()
+            compareVariantLabel.isVisible = compareModeToggle.isSelected && hasChoices
+            compareVariantSelector.isVisible = compareModeToggle.isSelected && hasChoices
+            compareRunLabel.isVisible = compareModeToggle.isSelected && currentCompareContext?.liveData != null
+            compareRunSelector.isVisible = compareModeToggle.isSelected && currentCompareContext?.liveData != null
+            openLogButton.isVisible = currentLiveData?.selectedRun != null || currentCompareContext?.liveData?.selectedRun != null
             jenkinsVariantHintLabel.text = when (variantSelection.mode) {
                 MerebJenkinsJobVariantSelectionMode.CURRENT_BRANCH ->
                     variantSelection.branchName?.let { "Following current branch '$it'." } ?: "Following the current branch."
@@ -1275,6 +1836,7 @@ private class MerebJenkinsToolWindowPanel(
                 MerebJenkinsJobVariantSelectionMode.MAPPED -> "Showing the mapped Jenkins job."
             }
         } finally {
+            updatingRunSelectors = false
             updatingVariantSelector = false
         }
     }

@@ -5,10 +5,18 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.assertContains
+import java.net.http.HttpTimeoutException
 import java.nio.file.Files
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 
 class MerebJenkinsJenkinsIntegrationTest {
+    private val summaryTree = "tree=name,fullName,url,color,_class,buildable,inQueue,jobs[name],queueItem[why,stuck,blocked,id],lastBuild[number,url,building,result,duration,timestamp],lastSuccessfulBuild[number,url,result,duration,timestamp]"
+
+    @BeforeEach
+    fun clearCaches() {
+        MerebJenkinsJenkinsClient.clearCachesForTests()
+    }
 
     @Test
     fun `password safe service name uses normalized base url and username`() {
@@ -64,6 +72,30 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
+    fun `state service remembers Jenkins view selections`() {
+        val service = MerebJenkinsJenkinsStateService()
+
+        service.rememberViewSelection(
+            MerebJenkinsViewSelection(
+                projectRootPath = "/tmp/ws/services/svc-auth",
+                compareEnabled = true,
+                primaryVariantJobPath = "svc-auth/feature-x",
+                compareVariantJobPath = "svc-auth/main",
+                primaryRunId = "32",
+                compareRunId = "31",
+            )
+        )
+
+        val selection = service.getViewSelection("/tmp/ws/services/svc-auth")
+        assertNotNull(selection)
+        assertTrue(selection.compareEnabled)
+        assertEquals("svc-auth/feature-x", selection.primaryVariantJobPath)
+        assertEquals("svc-auth/main", selection.compareVariantJobPath)
+        assertEquals("32", selection.primaryRunId)
+        assertEquals("31", selection.compareRunId)
+    }
+
+    @Test
     fun `job resolver auto selects exact root match and persists mapping`() {
         val service = MerebJenkinsJenkinsStateService()
         val transport = fakeTransport(
@@ -72,7 +104,7 @@ class MerebJenkinsJenkinsIntegrationTest {
                 {"jobs":[{"name":"svc-auth","fullName":"svc-auth","url":"https://jenkins.example.com/job/svc-auth/","color":"blue","_class":"org.jenkinsci.plugins.workflow.job.WorkflowJob"}]}
                 """.trimIndent()
             ),
-            "https://jenkins.example.com/job/svc-auth/api/json?tree=name,fullName,url,color,lastBuild[number,url],lastSuccessfulBuild[number,url]" to ok(
+            "https://jenkins.example.com/job/svc-auth/api/json?$summaryTree" to ok(
                 """
                 {"name":"svc-auth","fullName":"svc-auth","url":"https://jenkins.example.com/job/svc-auth/","color":"blue"}
                 """.trimIndent()
@@ -123,9 +155,52 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
+    fun `job resolver auto selects matching empty multibranch container`() {
+        val service = MerebJenkinsJenkinsStateService()
+        val transport = fakeTransport(
+            "https://jenkins.example.com/api/json?tree=jobs[name,fullName,url,color,_class]" to ok(
+                """
+                {"jobs":[{"name":"RMHY","fullName":"RMHY","url":"https://jenkins.example.com/job/RMHY/","color":"blue","_class":"com.cloudbees.hudson.plugins.folder.Folder"}]}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/RMHY/api/json?tree=jobs[name,fullName,url,color,_class]" to ok(
+                """
+                {"jobs":[{"name":"Mereb","fullName":"RMHY/Mereb","url":"https://jenkins.example.com/job/RMHY/job/Mereb/","color":"blue","_class":"com.cloudbees.hudson.plugins.folder.Folder"}]}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/RMHY/job/Mereb/api/json?tree=jobs[name,fullName,url,color,_class]" to ok(
+                """
+                {"jobs":[{"name":"backend","fullName":"RMHY/Mereb/backend","url":"https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/","color":"blue","_class":"com.cloudbees.hudson.plugins.folder.Folder"}]}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/api/json?tree=jobs[name,fullName,url,color,_class]" to ok(
+                """
+                {"jobs":[{"name":"svc-ops","fullName":"RMHY/Mereb/backend/svc-ops","url":"https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/","color":"notbuilt","_class":"org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject"}]}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/api/json?tree=jobs[name,fullName,url,color,_class]" to ok("""{"jobs":[]}"""),
+            "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/api/json?$summaryTree" to ok(
+                """
+                {"name":"svc-ops","fullName":"RMHY/Mereb/backend/svc-ops","url":"https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/","_class":"org.jenkinsci.plugins.workflow.multibranch.WorkflowMultiBranchProject","buildable":false,"jobs":[]}
+                """.trimIndent()
+            ),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+        val target = MerebJenkinsWorkspaceTarget(
+            projectRootPath = "/tmp/ws/services/svc-ops",
+            configFilePath = "/tmp/ws/services/svc-ops/.ci/ci.mjc",
+        )
+
+        val resolution = MerebJenkinsJobResolver.resolve(service, client, target, "/tmp/ws")
+
+        val resolved = assertIs<MerebJenkinsJobResolution.Resolved>(resolution)
+        assertEquals("RMHY/Mereb/backend/svc-ops", resolved.mapping.jobPath)
+    }
+
+    @Test
     fun `jenkins client parses live job data including runs pending input and artifacts`() {
         val transport = fakeTransport(
-            "https://jenkins.example.com/job/svc-auth/api/json?tree=name,fullName,url,color,lastBuild[number,url],lastSuccessfulBuild[number,url]" to ok(
+            "https://jenkins.example.com/job/svc-auth/api/json?$summaryTree" to ok(
                 """
                 {"name":"svc-auth","fullName":"svc-auth","url":"https://jenkins.example.com/job/svc-auth/","color":"blue","lastBuild":{"number":15,"url":"https://jenkins.example.com/job/svc-auth/15/"}}
                 """.trimIndent()
@@ -165,7 +240,7 @@ class MerebJenkinsJenkinsIntegrationTest {
     @Test
     fun `jenkins client normalizes relative and missing urls`() {
         val transport = fakeTransport(
-            "https://jenkins.example.com/job/svc-auth/api/json?tree=name,fullName,url,color,lastBuild[number,url],lastSuccessfulBuild[number,url]" to ok(
+            "https://jenkins.example.com/job/svc-auth/api/json?$summaryTree" to ok(
                 """
                 {"name":"svc-auth","fullName":"svc-auth","url":"/job/svc-auth/","color":"blue","lastBuild":{"number":15,"url":""}}
                 """.trimIndent()
@@ -277,6 +352,59 @@ class MerebJenkinsJenkinsIntegrationTest {
 
         val validation = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsConnectionValidation>>(result).value
         assertEquals("leul", validation.user.name)
+    }
+
+    @Test
+    fun `retrying transport retries one timeout and succeeds`() {
+        var attempts = 0
+        val transport = MerebJenkinsRetryingHttpTransport(
+            MerebJenkinsHttpTransport { url, _ ->
+                attempts += 1
+                if (attempts == 1) {
+                    throw HttpTimeoutException("timed out")
+                }
+                when (url) {
+                    "https://jenkins-retry.example.com/whoAmI/api/json?tree=authenticated,name,anonymous" ->
+                        ok("""{"authenticated":true,"anonymous":false,"name":"leul"}""")
+                    "https://jenkins-retry.example.com/api/json" ->
+                        ok("""{"mode":"NORMAL","nodeName":"built-in"}""")
+                    else -> error("Unexpected Jenkins request: $url")
+                }
+            }
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins-retry.example.com", "leul", "token", transport)
+
+        val result = client.validateConnection()
+
+        val validation = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsConnectionValidation>>(result).value
+        assertEquals("leul", validation.user.name)
+        assertEquals(3, attempts)
+    }
+
+    @Test
+    fun `visible job cache avoids repeated root fetches during refresh bursts`() {
+        var requests = 0
+        val transport = MerebJenkinsHttpTransport { url, _ ->
+            requests += 1
+            when {
+                url == "https://jenkins-cache.example.com/api/json?tree=jobs[name,fullName,url,color,_class]" -> ok(
+                    """
+                    {"jobs":[{"name":"svc-auth","fullName":"svc-auth","url":"https://jenkins-cache.example.com/job/svc-auth/","color":"blue","_class":"org.jenkinsci.plugins.workflow.job.WorkflowJob"}]}
+                    """.trimIndent()
+                )
+                else -> error("Unexpected Jenkins request: $url")
+            }
+        }
+        val client = MerebJenkinsJenkinsClient("https://jenkins-cache.example.com", "leul", "token", transport)
+
+        val first = client.fetchVisibleJobs()
+        val second = client.fetchVisibleJobs()
+
+        val firstJobs = assertIs<MerebJenkinsApiResult.Success<List<MerebJenkinsJobCandidate>>>(first).value
+        val secondJobs = assertIs<MerebJenkinsApiResult.Success<List<MerebJenkinsJobCandidate>>>(second).value
+        assertEquals(listOf("svc-auth"), firstJobs.map { it.jobPath })
+        assertEquals(listOf("svc-auth"), secondJobs.map { it.jobPath })
+        assertEquals(1, requests)
     }
 
     @Test

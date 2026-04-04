@@ -209,6 +209,41 @@ object MerebJenkinsJobResolver {
         return MerebJenkinsJobVariantSelection(candidates, mapped, branchName, MerebJenkinsJobVariantSelectionMode.MAPPED)
     }
 
+    fun selectCompareCandidate(
+        candidates: List<MerebJenkinsJobCandidate>,
+        primary: MerebJenkinsJobCandidate,
+        preferredJobPath: String? = null,
+    ): MerebJenkinsJobCandidate? {
+        if (candidates.isEmpty()) return null
+        preferredJobPath
+            ?.let(MerebJenkinsJenkinsStateService::normalizeJobPath)
+            ?.let { preferred -> candidates.firstOrNull { it.jobPath == preferred } }
+            ?.let { return it }
+        candidates.firstOrNull {
+            it.jobPath != primary.jobPath && MAIN_BRANCH_ALIASES.contains(normalizeBranchName(it.leafName))
+        }?.let { return it }
+        return candidates.firstOrNull { it.jobPath != primary.jobPath } ?: primary
+    }
+
+    fun candidateForPath(
+        candidates: List<MerebJenkinsJobCandidate>,
+        jobPath: String?,
+    ): MerebJenkinsJobCandidate? {
+        val normalized = MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)
+        if (normalized.isBlank()) return null
+        return candidates.firstOrNull { it.jobPath == normalized }
+    }
+
+    fun runChoices(liveData: MerebJenkinsLiveJobData?): List<MerebJenkinsRunChoice> {
+        if (liveData == null) return listOf(MerebJenkinsRunChoice())
+        return buildList {
+            add(MerebJenkinsRunChoice())
+            liveData.runs.forEach { run ->
+                add(MerebJenkinsRunChoice(id = run.id, label = "${run.name}  ${run.status.lowercase().replace('_', ' ')}"))
+            }
+        }.distinctBy { it.id ?: "<latest>" }
+    }
+
     fun workspaceLabel(workspaceTarget: MerebJenkinsWorkspaceTarget, workspaceBasePath: String?): String {
         if (workspaceBasePath.isNullOrBlank()) {
             return Paths.get(workspaceTarget.projectRootPath).fileName?.toString().orEmpty()

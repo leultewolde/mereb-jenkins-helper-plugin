@@ -91,6 +91,15 @@ data class MerebJenkinsJobMappingState(
     var resolvedAt: Long = 0L,
 )
 
+data class MerebJenkinsViewSelectionState(
+    var projectRootPath: String = "",
+    var compareEnabled: Boolean = false,
+    var primaryVariantJobPath: String = "",
+    var compareVariantJobPath: String = "",
+    var primaryRunId: String = "",
+    var compareRunId: String = "",
+)
+
 data class MerebJenkinsPersistedState(
     var baseUrl: String = MerebJenkinsJenkinsStateService.DEFAULT_BASE_URL,
     var username: String = "",
@@ -101,6 +110,7 @@ data class MerebJenkinsPersistedState(
     var lastRedirectTarget: String = "",
     var lastRedirectRelation: String = "",
     var jobMappings: MutableList<MerebJenkinsJobMappingState> = mutableListOf(),
+    var viewSelections: MutableList<MerebJenkinsViewSelectionState> = mutableListOf(),
 )
 
 @Service(Service.Level.APP)
@@ -118,6 +128,18 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
                         jobPath = it.jobPath,
                         jobDisplayName = it.jobDisplayName,
                         resolvedAt = it.resolvedAt,
+                    )
+                }
+                .toMutableList(),
+            viewSelections = state.viewSelections
+                .map {
+                    MerebJenkinsViewSelectionState(
+                        projectRootPath = it.projectRootPath,
+                        compareEnabled = it.compareEnabled,
+                        primaryVariantJobPath = it.primaryVariantJobPath,
+                        compareVariantJobPath = it.compareVariantJobPath,
+                        primaryRunId = it.primaryRunId,
+                        compareRunId = it.compareRunId,
                     )
                 }
                 .toMutableList()
@@ -142,6 +164,20 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
                             jobPath = normalizeJobPath(it.jobPath),
                             jobDisplayName = it.jobDisplayName.ifBlank { normalizeJobPath(it.jobPath) },
                             resolvedAt = it.resolvedAt,
+                        )
+                    }
+                    .distinctBy { it.projectRootPath }
+                    .toMutableList(),
+                viewSelections = state.viewSelections
+                    .filter { it.projectRootPath.isNotBlank() }
+                    .map {
+                        MerebJenkinsViewSelectionState(
+                            projectRootPath = it.projectRootPath.trim(),
+                            compareEnabled = it.compareEnabled,
+                            primaryVariantJobPath = normalizeJobPath(it.primaryVariantJobPath).ifBlank { "" },
+                            compareVariantJobPath = normalizeJobPath(it.compareVariantJobPath).ifBlank { "" },
+                            primaryRunId = it.primaryRunId.trim(),
+                            compareRunId = it.compareRunId.trim(),
                         )
                     }
                     .distinctBy { it.projectRootPath }
@@ -280,12 +316,54 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
             state.jobMappings = state.jobMappings
                 .filterNot { it.projectRootPath == normalizedRoot }
                 .toMutableList()
+            state.viewSelections = state.viewSelections
+                .filterNot { it.projectRootPath == normalizedRoot }
+                .toMutableList()
         }
     }
 
     fun clearJobMappings() {
         synchronized(stateLock) {
             state.jobMappings = mutableListOf()
+            state.viewSelections = mutableListOf()
+        }
+    }
+
+    fun getViewSelection(projectRootPath: String): MerebJenkinsViewSelection? {
+        val normalizedRoot = projectRootPath.trim()
+        return synchronized(stateLock) {
+            state.viewSelections.firstOrNull { it.projectRootPath == normalizedRoot }?.let {
+                MerebJenkinsViewSelection(
+                    projectRootPath = it.projectRootPath,
+                    compareEnabled = it.compareEnabled,
+                    primaryVariantJobPath = it.primaryVariantJobPath.ifBlank { null },
+                    compareVariantJobPath = it.compareVariantJobPath.ifBlank { null },
+                    primaryRunId = it.primaryRunId.ifBlank { null },
+                    compareRunId = it.compareRunId.ifBlank { null },
+                )
+            }
+        }
+    }
+
+    fun rememberViewSelection(selection: MerebJenkinsViewSelection) {
+        val normalizedRoot = selection.projectRootPath.trim()
+        if (normalizedRoot.isBlank()) return
+        synchronized(stateLock) {
+            state.viewSelections = state.viewSelections
+                .filterNot { it.projectRootPath == normalizedRoot }
+                .toMutableList()
+                .apply {
+                    add(
+                        MerebJenkinsViewSelectionState(
+                            projectRootPath = normalizedRoot,
+                            compareEnabled = selection.compareEnabled,
+                            primaryVariantJobPath = normalizeJobPath(selection.primaryVariantJobPath),
+                            compareVariantJobPath = normalizeJobPath(selection.compareVariantJobPath),
+                            primaryRunId = selection.primaryRunId.orEmpty().trim(),
+                            compareRunId = selection.compareRunId.orEmpty().trim(),
+                        )
+                    )
+                }
         }
     }
 

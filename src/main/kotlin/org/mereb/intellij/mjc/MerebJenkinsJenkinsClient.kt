@@ -13,6 +13,8 @@ import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.time.Duration
 import java.util.Base64
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 import org.yaml.snakeyaml.LoaderOptions
@@ -25,6 +27,8 @@ data class MerebJenkinsJobCandidate(
     val leafName: String,
     val url: String,
     val color: String? = null,
+    val container: Boolean = false,
+    val jobClass: String? = null,
 )
 
 enum class MerebJenkinsJobMatchKind {
@@ -64,6 +68,7 @@ data class MerebJenkinsRun(
     val status: String,
     val url: String,
     val durationMillis: Long? = null,
+    val timestampMillis: Long? = null,
     val running: Boolean = false,
     val stages: List<MerebJenkinsStage> = emptyList(),
 )
@@ -74,6 +79,14 @@ data class MerebJenkinsJobSummary(
     val displayName: String,
     val url: String,
     val color: String? = null,
+    val jobClass: String? = null,
+    val buildable: Boolean = true,
+    val branchCount: Int = 0,
+    val queueState: MerebJenkinsQueueState? = null,
+    val lastBuildStatus: String? = null,
+    val lastBuildRunning: Boolean = false,
+    val lastBuildDurationMillis: Long? = null,
+    val lastBuildTimestampMillis: Long? = null,
     val lastBuildNumber: Int? = null,
     val lastBuildUrl: String? = null,
     val lastSuccessfulBuildNumber: Int? = null,
@@ -235,6 +248,34 @@ class MerebJenkinsFallbackHttpTransport(
     }
 }
 
+class MerebJenkinsRetryingHttpTransport(
+    private val delegate: MerebJenkinsHttpTransport,
+    private val maxRetries: Int = 1,
+    private val retryDelayMillis: Long = 150,
+) : MerebJenkinsHttpTransport {
+    override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+        var attempt = 0
+        while (true) {
+            try {
+                return delegate.get(url, headers)
+            } catch (error: Exception) {
+                if (attempt >= maxRetries || !shouldRetry(error)) {
+                    throw error
+                }
+                attempt += 1
+                Thread.sleep(retryDelayMillis * attempt)
+            }
+        }
+    }
+
+    private fun shouldRetry(error: Exception): Boolean {
+        return error is HttpTimeoutException ||
+            error is ConnectException ||
+            error is UnknownHostException ||
+            error is SSLException
+    }
+}
+
 class MerebJenkinsJenkinsClient(
     private val baseUrl: String,
     private val username: String,
@@ -243,7 +284,6 @@ class MerebJenkinsJenkinsClient(
 ) {
     private val normalizedBaseUrl = MerebJenkinsJenkinsStateService.normalizeBaseUrl(baseUrl)
     private val authorizationHeader = "Basic " + Base64.getEncoder().encodeToString("$username:$token".toByteArray(StandardCharsets.UTF_8))
-    private val yamlLoad = Yaml(SafeConstructor(LoaderOptions()))
 
     fun validateConnection(): MerebJenkinsApiResult<MerebJenkinsConnectionValidation> {
         return requestMap("${normalizedBaseUrl}/whoAmI/api/json?tree=authenticated,name,anonymous").flatMapSuccess { body ->
@@ -294,8 +334,17 @@ class MerebJenkinsJenkinsClient(
         }
     }
 
+    private fun cacheKey(suffix: String): String = "${normalizedBaseUrl}::$suffix"
+
+    private fun newYaml(): Yaml = Yaml(SafeConstructor(LoaderOptions()))
+
     fun fetchVisibleJobs(): MerebJenkinsApiResult<List<MerebJenkinsJobCandidate>> {
-        return when (val root = requestMap("${normalizedBaseUrl}/api/json?tree=jobs[name,fullName,url,color,_class]")) {
+        return cachedSuccess(
+            key = cacheKey("visible-jobs"),
+            maxAgeMillis = VISIBLE_JOBS_CACHE_MS,
+            staleOnKinds = CACHEABLE_TRANSIENT_FAILURES,
+        ) {
+            when (val root = requestMap("${normalizedBaseUrl}/api/json?tree=jobs[name,fullName,url,color,_class]")) {
             is MerebJenkinsApiResult.Failure -> root
             is MerebJenkinsApiResult.Success -> {
                 val jobs = mutableListOf<MerebJenkinsJobCandidate>()
@@ -311,42 +360,129 @@ class MerebJenkinsJenkinsClient(
                     is MerebJenkinsApiResult.Success -> MerebJenkinsApiResult.Success(jobs.distinctBy { it.jobPath }.sortedBy { it.jobPath })
                 }
             }
+            }
         }
     }
 
     fun fetchJobSummary(jobPath: String): MerebJenkinsApiResult<MerebJenkinsJobSummary> {
         val path = encodeJobPath(jobPath)
-        return requestMap("${normalizedBaseUrl}$path/api/json?tree=name,fullName,url,color,lastBuild[number,url],lastSuccessfulBuild[number,url]").mapSuccess { body ->
-            MerebJenkinsJobSummary(
-                jobPath = MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath),
-                name = body.string("name").orEmpty(),
-                displayName = body.string("fullName") ?: body.string("name").orEmpty(),
-                url = absoluteJobUrl(jobPath, body.string("url")),
-                color = body.string("color"),
-                lastBuildNumber = body.map("lastBuild")?.int("number"),
-                lastBuildUrl = absoluteBuildUrl(jobPath, body.map("lastBuild")?.int("number"), body.map("lastBuild")?.string("url")),
-                lastSuccessfulBuildNumber = body.map("lastSuccessfulBuild")?.int("number"),
-                lastSuccessfulBuildUrl = absoluteBuildUrl(jobPath, body.map("lastSuccessfulBuild")?.int("number"), body.map("lastSuccessfulBuild")?.string("url")),
-            )
+        return cachedSuccess(
+            key = cacheKey("job-summary:${MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)}"),
+            maxAgeMillis = JOB_SUMMARY_CACHE_MS,
+            staleOnKinds = CACHEABLE_TRANSIENT_FAILURES,
+        ) {
+            requestMap(
+                "${normalizedBaseUrl}$path/api/json?tree=name,fullName,url,color,_class,buildable,inQueue,jobs[name],queueItem[why,stuck,blocked,id],lastBuild[number,url,building,result,duration,timestamp],lastSuccessfulBuild[number,url,result,duration,timestamp]"
+            ).mapSuccess { body ->
+                MerebJenkinsJobSummary(
+                    jobPath = MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath),
+                    name = body.string("name").orEmpty(),
+                    displayName = body.string("fullName") ?: body.string("name").orEmpty(),
+                    url = absoluteJobUrl(jobPath, body.string("url")),
+                    color = body.string("color"),
+                    jobClass = body.string("_class"),
+                    buildable = body.boolean("buildable") ?: true,
+                    branchCount = body.list("jobs").size,
+                    queueState = MerebJenkinsQueueState(
+                        inQueue = body.boolean("inQueue") ?: false,
+                        reason = body.map("queueItem")?.string("why"),
+                        blocked = body.map("queueItem")?.boolean("blocked") ?: false,
+                        stuck = body.map("queueItem")?.boolean("stuck") ?: false,
+                    ),
+                    lastBuildStatus = body.map("lastBuild")?.string("result"),
+                    lastBuildRunning = body.map("lastBuild")?.boolean("building") ?: false,
+                    lastBuildDurationMillis = body.map("lastBuild")?.long("duration"),
+                    lastBuildTimestampMillis = body.map("lastBuild")?.long("timestamp"),
+                    lastBuildNumber = body.map("lastBuild")?.int("number"),
+                    lastBuildUrl = absoluteBuildUrl(jobPath, body.map("lastBuild")?.int("number"), body.map("lastBuild")?.string("url")),
+                    lastSuccessfulBuildNumber = body.map("lastSuccessfulBuild")?.int("number"),
+                    lastSuccessfulBuildUrl = absoluteBuildUrl(jobPath, body.map("lastSuccessfulBuild")?.int("number"), body.map("lastSuccessfulBuild")?.string("url")),
+                )
+            }
         }
     }
 
-    fun fetchLiveJobData(jobPath: String): MerebJenkinsApiResult<MerebJenkinsLiveJobData> {
-        return when (val summaryResult = fetchJobSummary(jobPath)) {
+    fun fetchJobFamilyCandidates(
+        jobPath: String,
+        summary: MerebJenkinsJobSummary? = null,
+    ): MerebJenkinsApiResult<List<MerebJenkinsJobCandidate>> {
+        val normalizedJobPath = MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)
+        val resolvedSummary = summary ?: when (val result = fetchJobSummary(normalizedJobPath)) {
+            is MerebJenkinsApiResult.Success -> result.value
+            is MerebJenkinsApiResult.Failure -> return result
+        }
+        val fetchPath = when {
+            resolvedSummary.jobClass?.contains("WorkflowMultiBranchProject") == true -> normalizedJobPath
+            normalizedJobPath.contains('/') -> normalizedJobPath.substringBeforeLast('/')
+            else -> ""
+        }
+        val cacheKey = cacheKey("job-family:${normalizedJobPath}")
+        return cachedSuccess(cacheKey, JOB_FAMILY_CACHE_MS, CACHEABLE_TRANSIENT_FAILURES) {
+            val result = if (fetchPath.isBlank()) {
+                requestMap("${normalizedBaseUrl}/api/json?tree=jobs[name,fullName,url,color,_class]")
+            } else {
+                requestMap("${normalizedBaseUrl}${encodeJobPath(fetchPath)}/api/json?tree=jobs[name,fullName,url,color,_class]")
+            }
+            result.mapSuccess { body ->
+                val candidates = body.list("jobs").mapNotNull { payload ->
+                    val child = payload as? Map<*, *> ?: return@mapNotNull null
+                    val name = child.string("name") ?: return@mapNotNull null
+                    val childPath = listOf(fetchPath, name).filter { it.isNotBlank() }.joinToString("/")
+                    MerebJenkinsJobCandidate(
+                        jobPath = childPath,
+                        jobDisplayName = child.string("fullName") ?: childPath,
+                        leafName = name,
+                        url = child.string("url").orEmpty(),
+                        color = child.string("color"),
+                        jobClass = child.string("_class"),
+                    )
+                }
+                if (candidates.isEmpty()) {
+                    listOf(
+                        MerebJenkinsJobCandidate(
+                            jobPath = normalizedJobPath,
+                            jobDisplayName = resolvedSummary.displayName,
+                            leafName = resolvedSummary.name.ifBlank { normalizedJobPath.substringAfterLast('/') },
+                            url = resolvedSummary.url,
+                            color = resolvedSummary.color,
+                            container = resolvedSummary.jobClass?.contains("WorkflowMultiBranchProject") == true,
+                            jobClass = resolvedSummary.jobClass,
+                        )
+                    )
+                } else {
+                    candidates.sortedBy { it.jobPath }
+                }
+            }
+        }
+    }
+
+    fun fetchLiveJobData(
+        jobPath: String,
+        selectedRunId: String? = null,
+        preloadedSummary: MerebJenkinsJobSummary? = null,
+    ): MerebJenkinsApiResult<MerebJenkinsLiveJobData> {
+        val summaryFuture = asyncRequest { preloadedSummary?.let { MerebJenkinsApiResult.Success(it) } ?: fetchJobSummary(jobPath) }
+        val runsFuture = asyncRequest { requestList("${normalizedBaseUrl}${encodeJobPath(jobPath)}/wfapi/runs") }
+        return when (val summaryResult = summaryFuture.join()) {
             is MerebJenkinsApiResult.Failure -> summaryResult
             is MerebJenkinsApiResult.Success -> {
                 val summary = summaryResult.value
-                val pipelineSummary = requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/wfapi")
-                val runsResult = requestList("${normalizedBaseUrl}${encodeJobPath(jobPath)}/wfapi/runs")
+                val runsResult = runsFuture.join()
                 val runs = when (runsResult) {
                     is MerebJenkinsApiResult.Success -> runsResult.value.mapNotNull { runFromPayload(it, jobPath) }
                     is MerebJenkinsApiResult.Failure -> emptyList()
                 }
-                val pipelineAvailable = pipelineSummary is MerebJenkinsApiResult.Success || runsResult is MerebJenkinsApiResult.Success
-                val selectedRun = selectRun(runs)
-                val describedRun = selectedRun?.let { fetchRunDescribe(jobPath, it.id) } ?: selectedRun
-                val pendingInputs = describedRun?.let { fetchPendingInputs(jobPath, it.id) }.orEmpty()
-                val artifacts = describedRun?.let { fetchArtifacts(jobPath, it.id) }.orEmpty()
+                val pipelineAvailable = when (runsResult) {
+                    is MerebJenkinsApiResult.Success -> true
+                    is MerebJenkinsApiResult.Failure -> requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/wfapi") is MerebJenkinsApiResult.Success
+                }
+                val selectedRun = selectRun(runs, selectedRunId)
+                val describedRunFuture = selectedRun?.let { run -> asyncRequest { fetchRunDescribe(jobPath, run.id) } }
+                val pendingInputsFuture = selectedRun?.let { run -> asyncRequest { fetchPendingInputs(jobPath, run.id) } }
+                val artifactsFuture = selectedRun?.let { run -> asyncRequest { fetchArtifacts(jobPath, run.id) } }
+                val describedRun = describedRunFuture?.join() ?: selectedRun
+                val pendingInputs = pendingInputsFuture?.join() ?: emptyList()
+                val artifacts = artifactsFuture?.join() ?: emptyList()
 
                 MerebJenkinsApiResult.Success(
                     MerebJenkinsLiveJobData(
@@ -362,10 +498,43 @@ class MerebJenkinsJenkinsClient(
         }
     }
 
+    fun fetchConsoleExcerpt(jobPath: String, runId: String, stageName: String?): MerebJenkinsApiResult<MerebJenkinsConsoleExcerpt> {
+        return when (val response = requestText("${normalizedBaseUrl}${encodeJobPath(jobPath)}/${encodeSegment(runId)}/consoleText")) {
+            is MerebJenkinsApiResult.Failure -> response
+            is MerebJenkinsApiResult.Success -> {
+                val excerpt = excerptForStage(response.value, stageName)
+                MerebJenkinsApiResult.Success(
+                    MerebJenkinsConsoleExcerpt(
+                        runId = runId,
+                        stageName = stageName,
+                        excerpt = excerpt.first,
+                        anchored = excerpt.second,
+                        logUrl = absoluteBuildUrl(jobPath, runId.toIntOrNull(), null) + "console",
+                    )
+                )
+            }
+        }
+    }
+
     private fun fetchRunDescribe(jobPath: String, runId: String): MerebJenkinsRun? {
+        val key = cacheKey("run-describe:${MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)}:$runId")
+        val now = System.currentTimeMillis()
+        @Suppress("UNCHECKED_CAST")
+        val cached = responseCache[key] as? CachedSuccess<MerebJenkinsRun>
+        if (cached != null && now - cached.storedAtMillis <= RUN_DETAIL_CACHE_MS) {
+            return cached.value
+        }
         return when (val result = requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/${encodeSegment(runId)}/wfapi/describe")) {
-            is MerebJenkinsApiResult.Success -> runFromPayload(result.value, jobPath)
-            is MerebJenkinsApiResult.Failure -> null
+            is MerebJenkinsApiResult.Success -> {
+                val run = runFromPayload(result.value, jobPath)
+                if (run != null) {
+                    responseCache[key] = CachedSuccess(run, now)
+                }
+                run
+            }
+            is MerebJenkinsApiResult.Failure -> {
+                if (cached != null && result.problem.kind in CACHEABLE_TRANSIENT_FAILURES) cached.value else null
+            }
         }
     }
 
@@ -421,6 +590,17 @@ class MerebJenkinsJenkinsClient(
                 when (val nested = requestMap(url.ensureTrailingSlash() + "api/json?tree=jobs[name,fullName,url,color,_class]")) {
                     is MerebJenkinsApiResult.Failure -> return nested
                     is MerebJenkinsApiResult.Success -> {
+                        if (nested.value.list("jobs").isEmpty()) {
+                            jobs += MerebJenkinsJobCandidate(
+                                jobPath = childPath,
+                                jobDisplayName = displayName,
+                                leafName = name,
+                                url = url,
+                                color = color,
+                                container = true,
+                                jobClass = className,
+                            )
+                        }
                         when (val result = collectVisibleJobs(childPath, nested.value, jobs, visitedUrls)) {
                             is MerebJenkinsApiResult.Failure -> return result
                             is MerebJenkinsApiResult.Success -> Unit
@@ -434,13 +614,18 @@ class MerebJenkinsJenkinsClient(
                     leafName = name,
                     url = url,
                     color = color,
+                    container = false,
+                    jobClass = className,
                 )
             }
         }
         return MerebJenkinsApiResult.Success(Unit)
     }
 
-    private fun selectRun(runs: List<MerebJenkinsRun>): MerebJenkinsRun? {
+    private fun selectRun(runs: List<MerebJenkinsRun>, selectedRunId: String? = null): MerebJenkinsRun? {
+        selectedRunId?.takeIf { it.isNotBlank() }?.let { requested ->
+            runs.firstOrNull { it.id == requested }?.let { return it }
+        }
         return runs.firstOrNull { it.running } ?: runs.firstOrNull()
     }
 
@@ -454,6 +639,7 @@ class MerebJenkinsJenkinsClient(
             status = status,
             url = absoluteBuildUrl(jobPath, id.toIntOrNull(), map.string("url")),
             durationMillis = map.long("durationMillis"),
+            timestampMillis = map.long("startTimeMillis") ?: map.long("startTime"),
             running = status.contains("IN_PROGRESS") || status.contains("PAUSED") || status.contains("QUEUED"),
             stages = map.list("stages").mapNotNull { stagePayload ->
                 val stage = stagePayload as? Map<*, *> ?: return@mapNotNull null
@@ -481,6 +667,47 @@ class MerebJenkinsJenkinsClient(
         })
     }
 
+    private fun requestText(url: String, redirectDepth: Int = 0): MerebJenkinsApiResult<String> {
+        return try {
+            val response = transport.get(url, headers())
+            classifyEdgeFilter(response, url)?.let { problem ->
+                return MerebJenkinsApiResult.Failure(problem)
+            }
+            when (response.statusCode) {
+                HttpURLConnection.HTTP_OK -> MerebJenkinsApiResult.Success(response.body)
+                HttpURLConnection.HTTP_MOVED_PERM,
+                HttpURLConnection.HTTP_MOVED_TEMP,
+                HttpURLConnection.HTTP_SEE_OTHER,
+                307,
+                308 -> handleRedirect(url, response, { payload -> payload as? String }, redirectDepth)
+                HttpURLConnection.HTTP_UNAUTHORIZED, HttpURLConnection.HTTP_FORBIDDEN -> MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.AUTH,
+                        statusCode = response.statusCode,
+                        message = "Jenkins rejected the credentials.",
+                        requestUrl = url,
+                    )
+                )
+                else -> MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                        statusCode = response.statusCode,
+                        message = "Jenkins returned HTTP ${response.statusCode}.",
+                        requestUrl = url,
+                    )
+                )
+            }
+        } catch (error: Exception) {
+            MerebJenkinsApiResult.Failure(
+                when (error) {
+                    is HttpTimeoutException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.TIMEOUT, message = "Timed out while contacting Jenkins.", requestUrl = url)
+                    is ConnectException, is UnknownHostException, is SSLException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNREACHABLE, message = error.message, requestUrl = url)
+                    else -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNKNOWN, message = error.message, requestUrl = url)
+                }
+            )
+        }
+    }
+
     private fun <T> request(
         url: String,
         extractor: (Any?) -> T?,
@@ -493,7 +720,7 @@ class MerebJenkinsJenkinsClient(
             }
             when (response.statusCode) {
                 HttpURLConnection.HTTP_OK -> {
-                    val payload = yamlLoad.load<Any?>(response.body)
+                    val payload = newYaml().load<Any?>(response.body)
                     val extracted = extractor(payload)
                     if (extracted == null) {
                         MerebJenkinsApiResult.Failure(
@@ -702,14 +929,70 @@ class MerebJenkinsJenkinsClient(
     companion object {
         private const val MAX_REDIRECTS = 5
         private const val SCRIPTED_CLIENT_USER_AGENT = "curl/8.7.1 MerebJenkinsHelper"
+        private const val VISIBLE_JOBS_CACHE_MS = 30_000L
+        private const val JOB_FAMILY_CACHE_MS = 15_000L
+        private const val JOB_SUMMARY_CACHE_MS = 8_000L
+        private const val RUN_DETAIL_CACHE_MS = 8_000L
+        private val CACHEABLE_TRANSIENT_FAILURES = setOf(
+            MerebJenkinsApiProblemKind.TIMEOUT,
+            MerebJenkinsApiProblemKind.UNREACHABLE,
+            MerebJenkinsApiProblemKind.EDGE_FILTERED,
+        )
+        private val responseCache = ConcurrentHashMap<String, CachedSuccess<*>>()
 
         private fun defaultTransport(): MerebJenkinsHttpTransport {
-            val jdkTransport = MerebJenkinsJdkHttpTransport()
-            return if (MerebJenkinsCurlHttpTransport.isAvailable()) {
-                MerebJenkinsFallbackHttpTransport(jdkTransport, MerebJenkinsCurlHttpTransport())
+            val jdkTransport = MerebJenkinsJdkHttpTransport(
+                connectTimeout = Duration.ofSeconds(4),
+                requestTimeout = Duration.ofSeconds(8),
+            )
+            val baseTransport = if (MerebJenkinsCurlHttpTransport.isAvailable()) {
+                MerebJenkinsFallbackHttpTransport(
+                    jdkTransport,
+                    MerebJenkinsCurlHttpTransport(connectTimeoutSeconds = 4, requestTimeoutSeconds = 8)
+                )
             } else {
                 jdkTransport
             }
+            return MerebJenkinsRetryingHttpTransport(baseTransport)
+        }
+
+        private fun <T : Any> cachedSuccess(
+            key: String,
+            maxAgeMillis: Long,
+            staleOnKinds: Set<MerebJenkinsApiProblemKind> = emptySet(),
+            loader: () -> MerebJenkinsApiResult<T>,
+        ): MerebJenkinsApiResult<T> {
+            val now = System.currentTimeMillis()
+            @Suppress("UNCHECKED_CAST")
+            val cached = responseCache[key] as? CachedSuccess<T>
+            if (cached != null && now - cached.storedAtMillis <= maxAgeMillis) {
+                return MerebJenkinsApiResult.Success(cached.value)
+            }
+            return when (val loaded = loader()) {
+                is MerebJenkinsApiResult.Success -> {
+                    responseCache[key] = CachedSuccess(loaded.value, now)
+                    loaded
+                }
+                is MerebJenkinsApiResult.Failure ->
+                    if (cached != null && loaded.problem.kind in staleOnKinds) {
+                        MerebJenkinsApiResult.Success(cached.value)
+                    } else {
+                        loaded
+                    }
+            }
+        }
+
+        private fun <T> asyncRequest(block: () -> T): CompletableFuture<T> {
+            return CompletableFuture.supplyAsync(block)
+        }
+
+        private data class CachedSuccess<T : Any>(
+            val value: T,
+            val storedAtMillis: Long,
+        )
+
+        internal fun clearCachesForTests() {
+            responseCache.clear()
         }
 
         fun encodeJobPath(jobPath: String): String = "/" + MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)
@@ -789,6 +1072,20 @@ class MerebJenkinsJenkinsClient(
 
         private fun normalizeUserIdentity(value: String): String {
             return value.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
+        }
+
+        private fun excerptForStage(consoleText: String, stageName: String?): Pair<String, Boolean> {
+            val lines = consoleText.lineSequence().toList()
+            if (lines.isEmpty()) return "No console output was returned by Jenkins." to false
+            if (!stageName.isNullOrBlank()) {
+                val matchIndex = lines.indexOfFirst { it.contains(stageName, ignoreCase = true) }
+                if (matchIndex >= 0) {
+                    val start = (matchIndex - 10).coerceAtLeast(0)
+                    val end = (matchIndex + 30).coerceAtMost(lines.lastIndex)
+                    return lines.subList(start, end + 1).joinToString("\n") to true
+                }
+            }
+            return lines.takeLast(80).joinToString("\n") to false
         }
     }
 }
