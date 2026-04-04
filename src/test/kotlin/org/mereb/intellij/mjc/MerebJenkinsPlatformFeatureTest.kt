@@ -19,6 +19,7 @@ class MerebJenkinsPlatformFeatureTest : BasePlatformTestCase() {
 
         assertNotNull(doc)
         assertTrue(doc?.contains("Declares the primary pipeline executor") == true)
+        assertTrue(doc?.contains("Jenkins Impact") == true)
     }
 
     fun `test completion suggests recipe values`() {

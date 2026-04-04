@@ -22,14 +22,15 @@ class MerebJenkinsLineMarkerProvider : LineMarkerProviderDescriptor() {
         if (!MerebJenkinsConfigPaths.isSchemaTargetPath(file.path)) return null
         val path = MerebJenkinsPsiUtils.pathForElement(keyValue) ?: return null
         if (!isNavigablePath(path)) return null
-        val tooltip = "Open Mereb Jenkins for ${path}"
+        val tabName = tabForPath(path)
+        val tooltip = "Open Mereb Jenkins $tabName for ${path}"
         return LineMarkerInfo(
             element,
             element.textRange,
             ICON,
             { _: PsiElement -> tooltip },
             GutterIconNavigationHandler<PsiElement> { _, elt ->
-                MerebJenkinsProjectUiStateService.openToolWindow(elt.project, path, "Jenkins")
+                MerebJenkinsProjectUiStateService.openToolWindow(elt.project, path, tabName)
             },
             GutterIconRenderer.Alignment.LEFT,
             { tooltip },
@@ -44,21 +45,29 @@ class MerebJenkinsLineMarkerProvider : LineMarkerProviderDescriptor() {
         }
         val first = segments.first() as? MerebJenkinsPathSegment.Key ?: return false
         return when (first.name) {
-            "deploy" -> segments.size >= 2 && (segments[1] as? MerebJenkinsPathSegment.Key)?.name !in setOf(null, "order")
+            "deploy" -> segments.size == 2 && (segments[1] as? MerebJenkinsPathSegment.Key)?.name !in setOf(null, "order")
             "microfrontend" ->
-                segments.size >= 3 &&
+                segments.size == 3 &&
                     (segments[1] as? MerebJenkinsPathSegment.Key)?.name == "environments" &&
                     (segments[2] as? MerebJenkinsPathSegment.Key) != null
             "terraform" ->
-                segments.size >= 3 &&
+                segments.size == 3 &&
                     (segments[1] as? MerebJenkinsPathSegment.Key)?.name == "environments" &&
                     (segments[2] as? MerebJenkinsPathSegment.Key) != null
             else -> false
         }
     }
 
+    private fun tabForPath(path: MerebJenkinsPath): String {
+        val first = path.segments.firstOrNull() as? MerebJenkinsPathSegment.Key ?: return "Jenkins"
+        return when (first.name) {
+            "deploy", "microfrontend", "terraform" -> "Relations"
+            else -> "Flow"
+        }
+    }
+
     companion object {
         private val ICON = IconLoader.getIcon("/icons/mereb-toolwindow.svg", MerebJenkinsLineMarkerProvider::class.java)
-        private val TOP_LEVEL_KEYS = setOf("recipe", "delivery", "build", "image", "release", "releaseStages", "deploy", "microfrontend", "terraform")
+        private val TOP_LEVEL_KEYS = setOf("build", "image", "release", "releaseStages", "deploy", "microfrontend", "terraform")
     }
 }

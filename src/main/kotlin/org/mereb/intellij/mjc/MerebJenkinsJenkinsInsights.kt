@@ -167,6 +167,22 @@ data class MerebJenkinsViewSelection(
     val compareRunId: String? = null,
 )
 
+private enum class MerebJenkinsStageFamily {
+    BUILD,
+    IMAGE,
+    DEPLOY,
+    SMOKE,
+    RELEASE,
+    MICROFRONTEND,
+    TERRAFORM,
+    CUSTOM,
+}
+
+private data class MerebJenkinsStageSignature(
+    val family: MerebJenkinsStageFamily,
+    val normalizedName: String,
+)
+
 internal object MerebJenkinsInsights {
     fun buildStageMappings(
         analysis: MerebJenkinsAnalysisResult,
@@ -178,28 +194,29 @@ internal object MerebJenkinsInsights {
         }
         val stages = liveData.selectedRun?.stages.orEmpty()
         val matchedStageIds = mutableSetOf<String>()
+        val stageSignatures = stages.associateWith { classifyStage(it.name) }
         val resolved = expected.map { mapping ->
-            val scored = stages
-                .map { stage -> stage to mappingScore(mapping.expectedTokens, stage.name) }
-                .filter { it.second > 0 }
-                .sortedByDescending { it.second }
+            val matches = stages.filter { stage ->
+                matchesMapping(
+                    mapping = mapping,
+                    signature = stageSignatures.getValue(stage),
+                )
+            }
             when {
-                scored.isEmpty() -> mapping.copy(
+                matches.isEmpty() -> mapping.copy(
                     status = MerebJenkinsStageMappingStatus.MISSING,
                     detail = "Expected stage missing from the selected Jenkins run.",
                 )
-                scored.size > 1 && scored.first().second == scored[1].second -> mapping.copy(
-                    status = MerebJenkinsStageMappingStatus.AMBIGUOUS,
-                    liveStageName = scored.first().first.name,
-                    detail = "Multiple Jenkins stages match this config step.",
-                )
                 else -> {
-                    val matched = scored.first().first
-                    matchedStageIds += matched.id
+                    matches.forEach { matchedStageIds += it.id }
                     mapping.copy(
                         status = MerebJenkinsStageMappingStatus.MATCHED,
-                        liveStageName = matched.name,
-                        detail = "Matched Jenkins stage ${matched.name}.",
+                        liveStageName = matches.first().name,
+                        detail = when (matches.size) {
+                            1 -> "Matched Jenkins stage ${matches.first().name}."
+                            2 -> "Matched Jenkins stages ${matches[0].name} and ${matches[1].name}."
+                            else -> "Matched ${matches.size} Jenkins stages including ${matches.take(3).joinToString(", ") { it.name }}."
+                        },
                     )
                 }
             }
@@ -207,8 +224,9 @@ internal object MerebJenkinsInsights {
 
         val extraStages = stages
             .filterNot { it.id in matchedStageIds }
-            .filterNot { shouldIgnoreExtraStage(it.name) }
+            .filter { shouldReportAsExtra(stageSignatures.getValue(it), analysis) }
             .map { stage ->
+                val signature = stageSignatures.getValue(stage)
                 MerebJenkinsConfigStageMapping(
                     id = "extra-${normalizeStageText(stage.name)}",
                     label = stage.name,
@@ -217,7 +235,7 @@ internal object MerebJenkinsInsights {
                     expectedTokens = emptySet(),
                     status = MerebJenkinsStageMappingStatus.EXTRA,
                     liveStageName = stage.name,
-                    detail = "Live Jenkins stage not explained by the current Mereb config.",
+                    detail = extraStageDetail(signature, analysis),
                 )
             }
 
@@ -460,17 +478,115 @@ internal object MerebJenkinsInsights {
         return mappings
     }
 
-    private fun mappingScore(expectedTokens: Set<String>, stageName: String): Int {
-        if (expectedTokens.isEmpty()) return 0
-        val normalizedStage = normalizeStageText(stageName)
-        return expectedTokens.count { token ->
-            normalizedStage == token || normalizedStage.contains(token)
+    private fun matchesMapping(
+        mapping: MerebJenkinsConfigStageMapping,
+        signature: MerebJenkinsStageSignature,
+    ): Boolean {
+        return when {
+            mapping.id == "build" -> signature.family == MerebJenkinsStageFamily.BUILD
+            mapping.id == "image" -> signature.family == MerebJenkinsStageFamily.IMAGE
+            mapping.id == "release" || mapping.id == "release-stages" -> signature.family == MerebJenkinsStageFamily.RELEASE
+            mapping.id.startsWith("deploy-") -> matchesEnvironmentStage(
+                signature = signature,
+                environment = mapping.id.removePrefix("deploy-"),
+                acceptedFamilies = setOf(MerebJenkinsStageFamily.DEPLOY, MerebJenkinsStageFamily.SMOKE),
+            )
+            mapping.id.startsWith("microfrontend-") -> matchesEnvironmentStage(
+                signature = signature,
+                environment = mapping.id.removePrefix("microfrontend-"),
+                acceptedFamilies = setOf(MerebJenkinsStageFamily.MICROFRONTEND),
+            )
+            mapping.id.startsWith("terraform-") -> matchesEnvironmentStage(
+                signature = signature,
+                environment = mapping.id.removePrefix("terraform-"),
+                acceptedFamilies = setOf(MerebJenkinsStageFamily.TERRAFORM),
+            )
+            else -> mapping.expectedTokens.any { token ->
+                signature.normalizedName == token || signature.normalizedName.contains(token)
+            }
         }
     }
 
-    private fun shouldIgnoreExtraStage(stageName: String): Boolean {
+    private fun matchesEnvironmentStage(
+        signature: MerebJenkinsStageSignature,
+        environment: String,
+        acceptedFamilies: Set<MerebJenkinsStageFamily>,
+    ): Boolean {
+        if (signature.family !in acceptedFamilies) return false
+        return signature.normalizedName.contains(normalizeStageText(environment))
+    }
+
+    private fun shouldReportAsExtra(
+        signature: MerebJenkinsStageSignature,
+        analysis: MerebJenkinsAnalysisResult,
+    ): Boolean {
+        return when (signature.family) {
+            MerebJenkinsStageFamily.CUSTOM -> true
+            MerebJenkinsStageFamily.RELEASE -> !analysis.summary.releaseEnabled
+            MerebJenkinsStageFamily.TERRAFORM -> analysis.summary.resolvedRecipe != "terraform"
+            MerebJenkinsStageFamily.MICROFRONTEND -> analysis.summary.resolvedRecipe != "microfrontend"
+            MerebJenkinsStageFamily.DEPLOY, MerebJenkinsStageFamily.SMOKE ->
+                analysis.summary.resolvedRecipe !in setOf("service", "microfrontend", "terraform")
+            MerebJenkinsStageFamily.IMAGE -> !analysis.summary.imageEnabled
+            MerebJenkinsStageFamily.BUILD -> false
+        }
+    }
+
+    private fun extraStageDetail(
+        signature: MerebJenkinsStageSignature,
+        analysis: MerebJenkinsAnalysisResult,
+    ): String {
+        return when (signature.family) {
+            MerebJenkinsStageFamily.RELEASE ->
+                "Release-like Jenkins stage is present even though release is not enabled in the current Mereb config."
+            MerebJenkinsStageFamily.TERRAFORM ->
+                "Terraform-like Jenkins stage is present, but the current Mereb recipe is not terraform."
+            MerebJenkinsStageFamily.MICROFRONTEND ->
+                "Publish-like Jenkins stage is present, but the current Mereb recipe is not microfrontend."
+            MerebJenkinsStageFamily.DEPLOY, MerebJenkinsStageFamily.SMOKE ->
+                "Environment stage is present, but the current Mereb config does not describe that rollout path."
+            MerebJenkinsStageFamily.IMAGE ->
+                "Image-related Jenkins stage is present, but the current Mereb config does not enable image output."
+            MerebJenkinsStageFamily.BUILD ->
+                "Build-related Jenkins stage is present, but it is not currently mapped to a Mereb config step."
+            MerebJenkinsStageFamily.CUSTOM ->
+                if (analysis.summary.resolvedRecipe == "service") {
+                    "Custom Jenkins stage outside the standard service stage families."
+                } else {
+                    "Custom Jenkins stage not explained by the current Mereb config."
+                }
+        }
+    }
+
+    private fun classifyStage(stageName: String): MerebJenkinsStageSignature {
         val normalized = normalizeStageText(stageName)
-        return normalized in setOf("checkout-scm", "declarative-checkout-scm", "declarative-post-actions", "post-actions")
+        val family = when {
+            normalized in setOf("checkout-scm", "declarative-checkout-scm", "declarative-post-actions", "post-actions") ->
+                MerebJenkinsStageFamily.BUILD
+            normalized.contains("terraform") || normalized.contains("plan") || normalized.contains("apply") ->
+                MerebJenkinsStageFamily.TERRAFORM
+            normalized.contains("github-release") || normalized.contains("release-tag") || normalized.contains("create-release") ||
+                normalized.contains("release") || normalized.contains("tag") ->
+                MerebJenkinsStageFamily.RELEASE
+            normalized.contains("publish") || normalized.contains("remote") ->
+                MerebJenkinsStageFamily.MICROFRONTEND
+            normalized.contains("smoke") ->
+                MerebJenkinsStageFamily.SMOKE
+            normalized.contains("deploy") || normalized.contains("rollout") ->
+                MerebJenkinsStageFamily.DEPLOY
+            normalized.contains("docker") || normalized.contains("image") || normalized.contains("container") ||
+                normalized.contains("verify-pull") || normalized.contains("push") ->
+                MerebJenkinsStageFamily.IMAGE
+            normalized.contains("bootstrap") || normalized.contains("prepare") || normalized.contains("install") ||
+                normalized.contains("lint") || normalized.contains("typecheck") || normalized.contains("test") ||
+                normalized.contains("build") || normalized.contains("compile") || normalized.contains("verify") ->
+                MerebJenkinsStageFamily.BUILD
+            else -> MerebJenkinsStageFamily.CUSTOM
+        }
+        return MerebJenkinsStageSignature(
+            family = family,
+            normalizedName = normalized,
+        )
     }
 
     private fun normalizeStageText(value: String): String {

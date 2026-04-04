@@ -226,6 +226,17 @@ private class MerebJenkinsToolWindowPanel(
     private val testSummaryLabel = JBLabel("No JUnit summary for the selected run.")
     private val compareTestSummaryLabel = JBLabel("Compare-side test summary is unavailable.")
     private val trendSummaryLabel = JBLabel("Flaky/stage trend analysis is unavailable.")
+    private val overviewSchemaLabel = JBLabel("Schema: idle").apply {
+        font = JBFont.small()
+        foreground = JBColor.GRAY
+    }
+    private val overviewCenterPanel = JPanel(GridLayout(1, 1, 10, 10))
+    private val overviewFindingsPanel = titledPanel("Findings", JBScrollPane(findingsList))
+    private val overviewSectionsPanel = titledPanel("Sections", JBScrollPane(sectionsList))
+    private val jenkinsCardsPanel = JPanel(GridLayout(2, 5, 10, 10))
+    private val jenkinsLivePanel = JPanel(GridLayout(1, 1, 10, 10))
+    private val jenkinsPrimaryPanel = JPanel(BorderLayout(0, 8))
+    private val jenkinsComparePanel = JPanel(BorderLayout(0, 8))
 
     val component: JComponent
         get() = root
@@ -365,7 +376,6 @@ private class MerebJenkinsToolWindowPanel(
         tabs.addTab("Jenkins", buildJenkinsTab())
         tabs.addTab("Flow", buildFlowTab())
         tabs.addTab("Relations", buildRelationsTab())
-        tabs.addTab("Upstream", buildUpstreamTab())
         root.add(tabs, BorderLayout.CENTER)
     }
 
@@ -404,23 +414,22 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsOpsCard)
         }
 
-        val findingsPanel = titledPanel("Findings", JBScrollPane(findingsList))
-        val sectionsPanel = titledPanel("Sections", JBScrollPane(sectionsList))
-        val center = JPanel(GridLayout(1, 2, 10, 10)).apply {
-            add(findingsPanel)
-            add(sectionsPanel)
-        }
         val actions = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(safeFixesButton)
             add(recipeButton)
             add(openJenkinsfileButton)
             add(migrateButton)
         }
+        val footer = JPanel(BorderLayout(0, 8)).apply {
+            add(actions, BorderLayout.NORTH)
+            add(overviewSchemaLabel, BorderLayout.SOUTH)
+        }
+        updateOverviewLayout()
 
         return JPanel(BorderLayout(0, 10)).apply {
             add(cards, BorderLayout.NORTH)
-            add(center, BorderLayout.CENTER)
-            add(actions, BorderLayout.SOUTH)
+            add(overviewCenterPanel, BorderLayout.CENTER)
+            add(footer, BorderLayout.SOUTH)
         }
     }
 
@@ -432,11 +441,10 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsErrorLabel)
             add(jenkinsDiagnosticsLabel)
         }
-        val cards = JPanel(GridLayout(3, 4, 10, 10)).apply {
+        jenkinsCardsPanel.apply {
             add(jenkinsConnectionCard)
             add(jenkinsJobCard)
             add(jenkinsBuildCard)
-            add(jenkinsCompareCard)
             add(jenkinsQueueCard)
             add(jenkinsApprovalCard)
             add(jenkinsSuccessCard)
@@ -444,7 +452,6 @@ private class MerebJenkinsToolWindowPanel(
             add(jenkinsArtifactCard)
             add(jenkinsTrendCard)
             add(jenkinsOpsCard)
-            add(StatusCard("Mode").also { it.update("Read-only", "Compare, drift, tests, trends, and safe actions are enabled.", Tone.NEUTRAL) })
         }
         val primarySelectorRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(jenkinsVariantLabel)
@@ -462,28 +469,25 @@ private class MerebJenkinsToolWindowPanel(
         }
         val top = JPanel(BorderLayout(0, 8)).apply {
             add(statusStack, BorderLayout.NORTH)
-            add(cards, BorderLayout.CENTER)
+            add(jenkinsCardsPanel, BorderLayout.CENTER)
             add(JPanel(BorderLayout(0, 6)).apply {
                 add(primarySelectorRow, BorderLayout.NORTH)
                 add(compareSelectorRow, BorderLayout.SOUTH)
             }, BorderLayout.SOUTH)
         }
 
-        val primaryPanel = JPanel(BorderLayout(0, 8)).apply {
+        jenkinsPrimaryPanel.apply {
             add(titledPanel("Recent Runs", JBScrollPane(jenkinsRunsList)), BorderLayout.NORTH)
             add(titledPanel("Stages", JBScrollPane(jenkinsStagesList)), BorderLayout.CENTER)
         }
-        val comparePanel = JPanel(BorderLayout(0, 8)).apply {
+        jenkinsComparePanel.apply {
             add(JPanel(BorderLayout(0, 6)).apply {
                 add(compareTestSummaryLabel, BorderLayout.NORTH)
                 add(titledPanel("Compare Runs", JBScrollPane(compareRunsList)), BorderLayout.CENTER)
             }, BorderLayout.NORTH)
             add(titledPanel("Compare Stages", JBScrollPane(compareStagesList)), BorderLayout.CENTER)
         }
-        val livePanel = JPanel(GridLayout(1, 2, 10, 10)).apply {
-            add(primaryPanel)
-            add(comparePanel)
-        }
+        updateJenkinsCompareLayout()
         val testPanel = JPanel(BorderLayout(0, 8)).apply {
             add(testSummaryLabel, BorderLayout.NORTH)
             add(JBScrollPane(jenkinsFailedTestsList), BorderLayout.CENTER)
@@ -513,7 +517,7 @@ private class MerebJenkinsToolWindowPanel(
             add(JBScrollPane(stageExcerptArea), BorderLayout.CENTER)
         }
         val center = JPanel(BorderLayout(0, 10)).apply {
-            add(livePanel, BorderLayout.NORTH)
+            add(jenkinsLivePanel, BorderLayout.NORTH)
             add(supportPanel, BorderLayout.CENTER)
             add(excerptPanel, BorderLayout.SOUTH)
         }
@@ -922,6 +926,7 @@ private class MerebJenkinsToolWindowPanel(
         upstreamStateLabel.text = "Schema status: checking…"
         upstreamHashesLabel.text = "Fetching live schema from GitHub…"
         upstreamErrorLabel.text = ""
+        overviewSchemaLabel.text = "Schema: checking upstream hash…"
         upstreamRefreshTask?.cancel(true)
         val refreshId = upstreamRefreshVersion.incrementAndGet()
         val application = ApplicationManager.getApplication()
@@ -940,6 +945,22 @@ private class MerebJenkinsToolWindowPanel(
                 upstreamStateLabel.text = "Schema status: ${if (status.isCurrent) "Current" else "Stale or unavailable"}"
                 upstreamHashesLabel.text = "Bundled ${status.bundledHash.take(10)}…  Remote ${status.remoteHash?.take(10) ?: "unavailable"}…"
                 upstreamErrorLabel.text = status.error ?: ""
+                overviewSchemaLabel.text = buildString {
+                    append("Schema: ")
+                    append(if (status.isCurrent) "current" else "stale or unavailable")
+                    append(". Bundled ")
+                    append(status.bundledHash.take(10))
+                    append("…")
+                    status.remoteHash?.let {
+                        append(" vs remote ")
+                        append(it.take(10))
+                        append("…")
+                    }
+                    status.error?.takeIf(String::isNotBlank)?.let {
+                        append(" — ")
+                        append(it)
+                    }
+                }
             }, ModalityState.any(), Condition<Any?> { isDisposedOrStale(refreshId) })
         }
     }
@@ -1876,9 +1897,15 @@ private class MerebJenkinsToolWindowPanel(
         refill(relationsModel, relationEntries)
         flowInfoLabel.text = currentImpactPreview?.let { "${it.title}: ${it.details.joinToString(" • ")}" }
             ?: "Derived runtime sequence. Double-click a step to jump to the relevant YAML section."
-        val relationSummary = currentDriftFindings.takeIf { it.isNotEmpty() }?.joinToString(" • ") { it.message }
-        relationsInfoLabel.text = relationSummary
-            ?: "Order lists, environment blocks, and recipe-driven sections are color-coded by relation status."
+        val matchedCount = currentStageMappings.count { it.status == MerebJenkinsStageMappingStatus.MATCHED }
+        val missingCount = currentStageMappings.count { it.status == MerebJenkinsStageMappingStatus.MISSING }
+        val extraCount = currentStageMappings.count { it.status == MerebJenkinsStageMappingStatus.EXTRA }
+        val driftCount = currentDriftFindings.size
+        relationsInfoLabel.text = if (currentStageMappings.isNotEmpty()) {
+            "$matchedCount Jenkins matches • $missingCount missing • $extraCount custom • $driftCount drift finding${if (driftCount == 1) "" else "s"}."
+        } else {
+            "Order lists, environment blocks, and recipe-driven sections are color-coded by relation status."
+        }
     }
 
     private fun updateCards(analysis: MerebJenkinsAnalysisResult?) {
@@ -1899,6 +1926,7 @@ private class MerebJenkinsToolWindowPanel(
             ).forEach {
                 it.update("No config", "Open a supported config file to populate this panel.", Tone.NEUTRAL)
             }
+            updateOverviewLayout()
             return
         }
         val summary = analysis.summary
@@ -1964,6 +1992,7 @@ private class MerebJenkinsToolWindowPanel(
             } ?: "Connect Jenkins and select a run to populate operations insight.",
             if (ops != null) toneForBuildStatus(currentLiveData?.selectedRun?.status) else Tone.NEUTRAL,
         )
+        updateOverviewLayout()
     }
 
     private fun updateButtons() {
@@ -2020,6 +2049,7 @@ private class MerebJenkinsToolWindowPanel(
         upstreamStateLabel.text = "Schema status: idle"
         upstreamHashesLabel.text = "Run a manual check to compare bundled and live schema hashes."
         upstreamErrorLabel.text = ""
+        overviewSchemaLabel.text = "Schema: idle. Run a manual check when you want to compare bundled and live hashes."
     }
 
     private fun scheduleRefresh(delayMs: Int = 300, rescanWorkspace: Boolean = false) {
@@ -2101,6 +2131,7 @@ private class MerebJenkinsToolWindowPanel(
         sectionsModel.clear()
         flowModel.clear()
         relationsModel.clear()
+        updateOverviewLayout()
     }
 
     private fun <T> refill(model: DefaultListModel<T>, values: List<T>) {
@@ -2173,6 +2204,7 @@ private class MerebJenkinsToolWindowPanel(
                 compareRunSelector.isVisible = false
                 openLogButton.isVisible = false
                 jenkinsVariantHintLabel.text = "Defaulting to the current branch when possible."
+                updateJenkinsCompareLayout()
                 return
             }
             variantSelection.candidates.forEach(jenkinsVariantSelector::addItem)
@@ -2206,6 +2238,7 @@ private class MerebJenkinsToolWindowPanel(
                 MerebJenkinsJobVariantSelectionMode.MANUAL -> "Showing the manually selected Jenkins job."
                 MerebJenkinsJobVariantSelectionMode.MAPPED -> "Showing the mapped Jenkins job."
             }
+            updateJenkinsCompareLayout()
         } finally {
             updatingRunSelectors = false
             updatingVariantSelector = false
@@ -2254,6 +2287,40 @@ private class MerebJenkinsToolWindowPanel(
         BrowserUtil.browse(normalized)
     }
 
+    private fun updateOverviewLayout() {
+        overviewCenterPanel.removeAll()
+        val grid = overviewCenterPanel.layout as GridLayout
+        if (findingsModel.size == 0) {
+            grid.rows = 1
+            grid.columns = 1
+            overviewCenterPanel.add(overviewSectionsPanel)
+        } else {
+            grid.rows = 1
+            grid.columns = 2
+            overviewCenterPanel.add(overviewFindingsPanel)
+            overviewCenterPanel.add(overviewSectionsPanel)
+        }
+        overviewCenterPanel.revalidate()
+        overviewCenterPanel.repaint()
+    }
+
+    private fun updateJenkinsCompareLayout() {
+        jenkinsLivePanel.removeAll()
+        val grid = jenkinsLivePanel.layout as GridLayout
+        if (currentCompareContext?.enabled == true) {
+            grid.rows = 1
+            grid.columns = 2
+            jenkinsLivePanel.add(jenkinsPrimaryPanel)
+            jenkinsLivePanel.add(jenkinsComparePanel)
+        } else {
+            grid.rows = 1
+            grid.columns = 1
+            jenkinsLivePanel.add(jenkinsPrimaryPanel)
+        }
+        jenkinsLivePanel.revalidate()
+        jenkinsLivePanel.repaint()
+    }
+
     override fun dispose() {
         disposed = true
         upstreamRefreshVersion.incrementAndGet()
@@ -2271,7 +2338,7 @@ private class MerebJenkinsToolWindowPanel(
             foreground = JBColor.GRAY
         }
         private val valueLabel = JBLabel("-").apply {
-            font = JBFont.h2().asBold()
+            font = JBFont.h3().asBold()
         }
         private val detailLabel = JBLabel(" ").apply {
             font = JBFont.small()
@@ -2282,7 +2349,7 @@ private class MerebJenkinsToolWindowPanel(
                 BorderFactory.createLineBorder(JBColor.border(), 1),
                 JBUI.Borders.empty(10)
             )
-            preferredSize = Dimension(140, 88)
+            preferredSize = Dimension(140, 76)
             add(titleLabel, BorderLayout.NORTH)
             add(valueLabel, BorderLayout.CENTER)
             add(detailLabel, BorderLayout.SOUTH)

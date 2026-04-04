@@ -5,6 +5,7 @@ import kotlin.test.assertIs
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import kotlin.test.assertContains
+import kotlin.test.assertFalse
 import java.net.http.HttpTimeoutException
 import java.nio.file.Files
 import org.junit.jupiter.api.BeforeEach
@@ -317,6 +318,94 @@ class MerebJenkinsJenkinsIntegrationTest {
         assertEquals(1, liveData.trendSummary.flakyStageCount)
         assertEquals("Deploy", liveData.trendSummary.stages.first().stageName)
         assertTrue(liveData.trendSummary.stages.first().flaky)
+    }
+
+    @Test
+    fun `jenkins insights group standard service stages instead of flagging them as extra`() {
+        val analysis = MerebJenkinsConfigAnalyzer().analyzeDetailed(
+            """
+            version: 1
+            recipe: service
+            build:
+              pnpm:
+                steps:
+                  - type: lint
+                    name: Lint ops service
+                  - type: typecheck
+                    name: Typecheck ops service
+                  - type: test
+                    name: Run unit tests
+            image:
+              repository: registry.example.com/mereb/svc-ops
+            deploy:
+              order:
+                - dev
+                - stg
+              dev:
+                namespace: apps-dev
+                smoke:
+                  url: https://api-dev.example.com/health
+              stg:
+                namespace: apps-stg
+                smoke:
+                  url: https://api-stg.example.com/health
+            release:
+              autoTag:
+                enabled: true
+            """.trimIndent(),
+            "/tmp/ws/services/svc-ops/.ci/ci.mjc",
+        )
+        val run = MerebJenkinsRun(
+            id = "25",
+            name = "#25",
+            status = "SUCCESS",
+            url = "https://jenkins.example.com/job/svc-ops/25/",
+            stages = listOf(
+                MerebJenkinsStage("bootstrap", "Bootstrap Node runtime", "SUCCESS"),
+                MerebJenkinsStage("prepare", "Prepare pnpm", "SUCCESS"),
+                MerebJenkinsStage("deps", "Install dependencies", "SUCCESS"),
+                MerebJenkinsStage("lint", "Lint ops service", "SUCCESS"),
+                MerebJenkinsStage("typecheck", "Typecheck ops service", "SUCCESS"),
+                MerebJenkinsStage("unit", "Run unit tests", "SUCCESS"),
+                MerebJenkinsStage("docker-build", "Docker Build", "SUCCESS"),
+                MerebJenkinsStage("docker-push", "Docker Push", "SUCCESS"),
+                MerebJenkinsStage("verify-pull", "Verify Pull", "SUCCESS"),
+                MerebJenkinsStage("deploy-dev", "Deploy DEV", "SUCCESS"),
+                MerebJenkinsStage("smoke-dev", "Smoke DEV", "SUCCESS"),
+                MerebJenkinsStage("deploy-stg", "Deploy STG", "SUCCESS"),
+                MerebJenkinsStage("smoke-stg", "Smoke STG", "SUCCESS"),
+                MerebJenkinsStage("release", "Create Release Tag", "SUCCESS"),
+            ),
+        )
+        val liveData = MerebJenkinsLiveJobData(
+            summary = MerebJenkinsJobSummary(
+                jobPath = "svc-ops/main",
+                name = "main",
+                displayName = "svc-ops/main",
+                url = "https://jenkins.example.com/job/svc-ops/job/main/",
+            ),
+            pipelineAvailable = true,
+            runs = listOf(run),
+            selectedRun = run,
+        )
+
+        val mappings = MerebJenkinsInsights.buildStageMappings(analysis, liveData)
+
+        assertFalse(mappings.any { it.status == MerebJenkinsStageMappingStatus.EXTRA })
+        assertEquals(MerebJenkinsStageMappingStatus.MATCHED, mappings.first { it.id == "build" }.status)
+        assertEquals(MerebJenkinsStageMappingStatus.MATCHED, mappings.first { it.id == "image" }.status)
+        assertEquals(MerebJenkinsStageMappingStatus.MATCHED, mappings.first { it.id == "deploy-dev" }.status)
+        assertEquals(MerebJenkinsStageMappingStatus.MATCHED, mappings.first { it.id == "deploy-stg" }.status)
+        assertEquals(MerebJenkinsStageMappingStatus.MATCHED, mappings.first { it.id == "release" }.status)
+        assertContains(mappings.first { it.id == "build" }.detail.orEmpty(), "Matched")
+    }
+
+    @Test
+    fun `metadata catalog inline hints are limited to major section anchors`() {
+        assertFalse(MerebJenkinsMetadataCatalog.shouldRenderInlineHint("recipe"))
+        assertFalse(MerebJenkinsMetadataCatalog.shouldRenderInlineHint("release.autoTag"))
+        assertTrue(MerebJenkinsMetadataCatalog.shouldRenderInlineHint("build"))
+        assertTrue(MerebJenkinsMetadataCatalog.shouldRenderInlineHint("deploy"))
     }
 
     @Test
