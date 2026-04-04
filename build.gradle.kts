@@ -82,6 +82,14 @@ fun escapeXml(value: String): String = buildString(value.length) {
 
 fun asCdata(value: String): String = value.replace("]]>", "]]]]><![CDATA[>")
 
+fun escapeHtml(value: String): String = escapeXml(value)
+
+fun htmlToPlainText(value: String): String = value
+    .replace(Regex("(?i)</?code>"), "")
+    .replace(Regex("<[^>]+>"), "")
+    .replace(Regex("\\s+"), " ")
+    .trim()
+
 repositories {
     mavenCentral()
     intellijPlatform {
@@ -231,6 +239,7 @@ tasks {
                 ?.takeIf { it.isNotBlank() }
                 ?.let { "Released from tag $it." }
                 ?: "Released from a local build."
+            val landingPageDescription = htmlToPlainText(metadata.description)
 
             File(outputDir, "updatePlugins.xml").writeText(
                 """
@@ -244,6 +253,123 @@ tasks {
                 |    <change-notes><![CDATA[${asCdata(changeNotes)}]]></change-notes>
                 |  </plugin>
                 |</plugins>
+                """.trimMargin() + "\n"
+            )
+            File(outputDir, "index.html").writeText(
+                """
+                |<!DOCTYPE html>
+                |<html lang="en">
+                |<head>
+                |  <meta charset="utf-8">
+                |  <meta name="viewport" content="width=device-width, initial-scale=1">
+                |  <title>${escapeHtml(metadata.name)}</title>
+                |  <style>
+                |    :root {
+                |      color-scheme: light dark;
+                |      --bg: #0f172a;
+                |      --panel: #111827;
+                |      --text: #e5e7eb;
+                |      --muted: #94a3b8;
+                |      --accent: #38bdf8;
+                |      --line: rgba(148, 163, 184, 0.24);
+                |    }
+                |    @media (prefers-color-scheme: light) {
+                |      :root {
+                |        --bg: #f8fafc;
+                |        --panel: #ffffff;
+                |        --text: #0f172a;
+                |        --muted: #475569;
+                |        --accent: #0369a1;
+                |        --line: rgba(15, 23, 42, 0.12);
+                |      }
+                |    }
+                |    body {
+                |      margin: 0;
+                |      font-family: Inter, "Segoe UI", sans-serif;
+                |      background: radial-gradient(circle at top, rgba(56, 189, 248, 0.18), transparent 40%), var(--bg);
+                |      color: var(--text);
+                |    }
+                |    main {
+                |      max-width: 780px;
+                |      margin: 48px auto;
+                |      padding: 0 20px;
+                |    }
+                |    .panel {
+                |      background: var(--panel);
+                |      border: 1px solid var(--line);
+                |      border-radius: 18px;
+                |      padding: 28px;
+                |      box-shadow: 0 18px 50px rgba(15, 23, 42, 0.18);
+                |    }
+                |    h1 {
+                |      margin: 0 0 12px;
+                |      font-size: 2rem;
+                |      line-height: 1.1;
+                |    }
+                |    p, li {
+                |      color: var(--muted);
+                |      line-height: 1.6;
+                |    }
+                |    code {
+                |      font-family: "SFMono-Regular", "JetBrains Mono", monospace;
+                |      font-size: 0.95em;
+                |      background: rgba(148, 163, 184, 0.14);
+                |      padding: 0.14rem 0.4rem;
+                |      border-radius: 0.4rem;
+                |      color: var(--text);
+                |    }
+                |    a {
+                |      color: var(--accent);
+                |      text-decoration: none;
+                |    }
+                |    a:hover {
+                |      text-decoration: underline;
+                |    }
+                |    .actions {
+                |      display: flex;
+                |      flex-wrap: wrap;
+                |      gap: 12px;
+                |      margin: 20px 0 24px;
+                |    }
+                |    .button {
+                |      display: inline-block;
+                |      padding: 0.8rem 1rem;
+                |      border-radius: 999px;
+                |      background: var(--accent);
+                |      color: white;
+                |      font-weight: 600;
+                |    }
+                |    .secondary {
+                |      background: transparent;
+                |      color: var(--accent);
+                |      border: 1px solid var(--line);
+                |    }
+                |    ul {
+                |      padding-left: 1.2rem;
+                |    }
+                |  </style>
+                |</head>
+                |<body>
+                |  <main>
+                |    <section class="panel">
+                |      <h1>${escapeHtml(metadata.name)}</h1>
+                |      <p>${escapeHtml(landingPageDescription)}</p>
+                |      <p>Version <code>${escapeHtml(version.toString())}</code> for IntelliJ builds <code>${escapeHtml(pluginSinceBuild)}</code> through <code>${escapeHtml(pluginUntilBuild)}</code>.</p>
+                |      <div class="actions">
+                |        <a class="button" href="updatePlugins.xml">Open updatePlugins.xml</a>
+                |        <a class="button secondary" href="plugins/${escapeHtml(publishedZip.name)}">Download ZIP</a>
+                |      </div>
+                |      <p>Add this custom repository URL in IntelliJ:</p>
+                |      <p><code>${escapeHtml("$baseUrl/updatePlugins.xml")}</code></p>
+                |      <ul>
+                |        <li>Open IntelliJ IDEA and go to <code>Settings / Preferences -> Plugins</code>.</li>
+                |        <li>Click the gear icon and choose <code>Manage Plugin Repositories...</code>.</li>
+                |        <li>Add the repository URL above, then install <code>${escapeHtml(metadata.name)}</code> from the Plugins UI.</li>
+                |      </ul>
+                |    </section>
+                |  </main>
+                |</body>
+                |</html>
                 """.trimMargin() + "\n"
             )
             File(outputDir, ".nojekyll").writeText("")

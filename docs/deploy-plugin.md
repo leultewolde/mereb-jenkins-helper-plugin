@@ -14,7 +14,13 @@ Before the first release:
 The published repository URL will be:
 
 ```text
-https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign/updatePlugins.xml
+https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/updatePlugins.xml
+```
+
+The GitHub Pages root URL is also usable as a human landing page:
+
+```text
+https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/
 ```
 
 ## Release Process
@@ -53,13 +59,14 @@ Run this from `pipeline-configs/mereb-jenkins-schema-pluign`:
 
 ```bash
 ./gradlew clean test buildPlugin generateCustomPluginRepository \
-  -PcustomPluginRepositoryBaseUrl=https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign
+  -PcustomPluginRepositoryBaseUrl=https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin
 ```
 
 Check:
 
 - `build/distributions/mereb-jenkins-helper-<version>.zip` exists
 - `build/custom-plugin-repository/updatePlugins.xml` points at the same versioned ZIP
+- `build/custom-plugin-repository/index.html` links to the same repository feed and ZIP
 - the generated XML contains the expected plugin id, version, and IntelliJ build range
 
 ## End-User Installation
@@ -71,7 +78,7 @@ Users install the plugin by adding the repository URL once in IntelliJ:
 3. Click the gear icon.
 4. Choose `Manage Plugin Repositories...`.
 5. Add:
-   `https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign/updatePlugins.xml`
+   `https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/updatePlugins.xml`
 6. Search for `Mereb Jenkins Helper` in the Plugins UI and install it.
 
 After that, IntelliJ checks the same repository URL for updates.

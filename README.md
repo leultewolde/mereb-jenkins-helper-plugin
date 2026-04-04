@@ -23,7 +23,7 @@ To generate a Pages-ready custom plugin repository locally:
 
 ```bash
 ./gradlew clean test buildPlugin generateCustomPluginRepository \
-  -PcustomPluginRepositoryBaseUrl=https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign
+  -PcustomPluginRepositoryBaseUrl=https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin
 ```
 
 That writes these files to `build/custom-plugin-repository/`:
@@ -40,12 +40,13 @@ Use a custom plugin repository instead of `Install Plugin from Disk`.
 3. Click the gear icon.
 4. Choose `Manage Plugin Repositories...`.
 5. Add:
-   `https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign/updatePlugins.xml`
+   `https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/updatePlugins.xml`
 6. Search for `Mereb Jenkins Helper` in the Plugins UI and install it.
 
 After that one-time setup, IntelliJ will check the same repository URL for updates.
 
 The initial rollout is unsigned. IntelliJ may show a trust warning during install or update.
+The GitHub Pages root URL also serves a small landing page that links to the repository feed and current ZIP.
 
 ## Development
 
