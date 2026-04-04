@@ -145,6 +145,104 @@ class MerebJenkinsJenkinsIntegrationTest {
         assertEquals("https://jenkins.example.com/job/svc-auth/15/artifact/logs/build.log", liveData.artifacts.single().url)
     }
 
+    @Test
+    fun `jenkins client normalizes relative and missing urls`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/job/svc-auth/api/json?tree=name,fullName,url,color,lastBuild[number,url],lastSuccessfulBuild[number,url]" to ok(
+                """
+                {"name":"svc-auth","fullName":"svc-auth","url":"/job/svc-auth/","color":"blue","lastBuild":{"number":15,"url":""}}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/svc-auth/wfapi" to ok("""{"stages":[]}"""),
+            "https://jenkins.example.com/job/svc-auth/wfapi/runs" to ok(
+                """
+                [{"id":"15","name":"#15","status":"SUCCESS","url":"","durationMillis":1234,"stages":[]}]
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/svc-auth/15/wfapi/describe" to ok(
+                """
+                {"id":"15","name":"#15","status":"SUCCESS","url":"","durationMillis":1234,"stages":[]}
+                """.trimIndent()
+            ),
+            "https://jenkins.example.com/job/svc-auth/15/wfapi/pendingInputActions" to ok("""[]"""),
+            "https://jenkins.example.com/job/svc-auth/15/api/json?tree=url,artifacts[fileName,relativePath]" to ok(
+                """
+                {"url":"","artifacts":[{"fileName":"report.txt","relativePath":"reports/report.txt"}]}
+                """.trimIndent()
+            ),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.fetchLiveJobData("svc-auth")
+
+        val liveData = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsLiveJobData>>(result).value
+        assertEquals("https://jenkins.example.com/job/svc-auth/", liveData.summary.url)
+        assertEquals("https://jenkins.example.com/job/svc-auth/15/", liveData.selectedRun?.url)
+        assertEquals("https://jenkins.example.com/job/svc-auth/15/", liveData.summary.lastBuildUrl)
+        assertEquals("https://jenkins.example.com/job/svc-auth/15/artifact/reports/report.txt", liveData.artifacts.single().url)
+    }
+
+    @Test
+    fun `jenkins client follows same-origin canonical redirects`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/api/json" to MerebJenkinsHttpResponse(
+                statusCode = 302,
+                body = "",
+                effectiveUrl = "https://jenkins.example.com/api/json",
+                headers = mapOf("location" to listOf("/api/json/")),
+            ),
+            "https://jenkins.example.com/api/json/" to ok("""{"mode":"NORMAL","nodeName":"built-in"}"""),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.validateController()
+
+        val controller = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsControllerInfo>>(result).value
+        assertEquals("built-in", controller.nodeName)
+    }
+
+    @Test
+    fun `jenkins client reports login redirects as auth failures`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/api/json" to MerebJenkinsHttpResponse(
+                statusCode = 302,
+                body = "",
+                effectiveUrl = "https://jenkins.example.com/api/json",
+                headers = mapOf("location" to listOf("/login?from=%2Fapi%2Fjson")),
+            ),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.validateController()
+
+        val failure = assertIs<MerebJenkinsApiResult.Failure>(result)
+        assertEquals(MerebJenkinsApiProblemKind.AUTH, failure.problem.kind)
+        assertTrue(failure.problem.message.orEmpty().contains("redirected"))
+    }
+
+    @Test
+    fun `variant selection follows current branch and falls back to main`() {
+        val mapping = MerebJenkinsJobMapping(
+            projectRootPath = "/tmp/ws/services/svc-ops",
+            jobPath = "RMHY/Mereb/backend/svc-ops/main",
+            jobDisplayName = "RMHY/Mereb/backend/svc-ops/main",
+            resolvedAt = 123L,
+        )
+        val jobs = listOf(
+            MerebJenkinsJobCandidate("RMHY/Mereb/backend/svc-ops/main", "RMHY/Mereb/backend/svc-ops/main", "main", "https://jenkins.example.com/job/main/"),
+            MerebJenkinsJobCandidate("RMHY/Mereb/backend/svc-ops/feature-faster-sync", "RMHY/Mereb/backend/svc-ops/feature-faster-sync", "feature-faster-sync", "https://jenkins.example.com/job/feature-faster-sync/"),
+            MerebJenkinsJobCandidate("RMHY/Mereb/backend/svc-ops/PR-42", "RMHY/Mereb/backend/svc-ops/PR-42", "PR-42", "https://jenkins.example.com/job/PR-42/"),
+        )
+
+        val branchMatch = MerebJenkinsJobResolver.resolveVariantSelection(mapping, jobs, "feature/faster-sync")
+        val fallback = MerebJenkinsJobResolver.resolveVariantSelection(mapping, jobs, "bugfix/no-jenkins-job")
+
+        assertEquals("RMHY/Mereb/backend/svc-ops/feature-faster-sync", branchMatch.selected.jobPath)
+        assertEquals(MerebJenkinsJobVariantSelectionMode.CURRENT_BRANCH, branchMatch.mode)
+        assertEquals("RMHY/Mereb/backend/svc-ops/main", fallback.selected.jobPath)
+        assertEquals(MerebJenkinsJobVariantSelectionMode.MAIN_FALLBACK, fallback.mode)
+    }
+
     private fun fakeTransport(vararg responses: Pair<String, MerebJenkinsHttpResponse>): MerebJenkinsHttpTransport {
         val byUrl = responses.toMap()
         return MerebJenkinsHttpTransport { url, _ ->

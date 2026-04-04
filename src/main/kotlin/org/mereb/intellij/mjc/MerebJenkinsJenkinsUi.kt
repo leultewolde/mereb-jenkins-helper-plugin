@@ -18,6 +18,8 @@ import com.intellij.util.ui.FormBuilder
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import javax.swing.Action
 import javax.swing.JComponent
 import javax.swing.JPanel
@@ -102,7 +104,20 @@ class MerebJenkinsConnectionDialog(
 
     private fun openTokenPage() {
         val baseUrl = currentBaseUrl().ifBlank { snapshot.baseUrl.ifBlank { MerebJenkinsJenkinsStateService.DEFAULT_BASE_URL } }
-        BrowserUtil.browse("$baseUrl/me/configure")
+        val username = currentUsername()
+        val targetUrl = if (username.isNotBlank()) {
+            "$baseUrl/user/${encodeUrlSegment(username)}/configure"
+        } else {
+            "$baseUrl/me/configure/"
+        }
+        statusLabel.text = if (username.isNotBlank()) {
+            "Opened the Jenkins profile page for $username. Create or copy an API token there."
+        } else {
+            "Opened Jenkins. Sign in first, then open your profile settings to create an API token."
+        }
+        statusLabel.revalidate()
+        statusLabel.repaint()
+        BrowserUtil.browse(targetUrl)
     }
 
     private fun performConnectionTest() {
@@ -113,7 +128,10 @@ class MerebJenkinsConnectionDialog(
             statusLabel.text = "Enter both the Jenkins URL and username before testing the connection."
             return
         }
+        setErrorText(null)
         statusLabel.text = "Testing Jenkins connection…"
+        statusLabel.revalidate()
+        statusLabel.repaint()
         ApplicationManager.getApplication().executeOnPooledThread {
             val effectiveToken = token ?: stateService.resolveToken(baseUrl, username)
             val result = if (effectiveToken.isNullOrBlank()) {
@@ -128,10 +146,23 @@ class MerebJenkinsConnectionDialog(
             }
             ApplicationManager.getApplication().invokeLater {
                 statusLabel.text = when (result) {
-                    is MerebJenkinsApiResult.Success -> "Connected to Jenkins${result.value.nodeName?.let { " ($it)" } ?: ""}."
-                    is MerebJenkinsApiResult.Failure -> result.problem.message ?: "Unable to connect to Jenkins."
+                    is MerebJenkinsApiResult.Success -> {
+                        stateService.recordConnectionStatus(MerebJenkinsConnectionStatus.CONNECTED, null, System.currentTimeMillis())
+                        "Connected to Jenkins${result.value.nodeName?.let { " ($it)" } ?: ""}."
+                    }
+                    is MerebJenkinsApiResult.Failure -> {
+                        val status = when (result.problem.kind) {
+                            MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
+                            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.UNREACHABLE
+                            else -> MerebJenkinsConnectionStatus.ERROR
+                        }
+                        stateService.recordConnectionStatus(status, result.problem.message, null)
+                        result.problem.message ?: "Unable to connect to Jenkins."
+                    }
                 }
                 refreshTokenHint()
+                statusLabel.revalidate()
+                statusLabel.repaint()
             }
         }
     }
@@ -152,6 +183,8 @@ class MerebJenkinsConnectionDialog(
             }
         }
     }
+
+    private fun encodeUrlSegment(value: String): String = URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20")
 
     private inner class OpenTokenPageAction : DialogWrapperAction("Open Token Page") {
         override fun doAction(event: java.awt.event.ActionEvent?) {

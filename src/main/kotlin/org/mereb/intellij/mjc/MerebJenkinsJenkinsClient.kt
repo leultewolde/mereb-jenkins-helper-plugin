@@ -91,6 +91,7 @@ data class MerebJenkinsHttpResponse(
     val statusCode: Int,
     val body: String,
     val effectiveUrl: String,
+    val headers: Map<String, List<String>> = emptyMap(),
 )
 
 fun interface MerebJenkinsHttpTransport {
@@ -103,7 +104,7 @@ class MerebJenkinsJdkHttpTransport(
 ) : MerebJenkinsHttpTransport {
     private val client = HttpClient.newBuilder()
         .connectTimeout(connectTimeout)
-        .followRedirects(HttpClient.Redirect.NORMAL)
+        .followRedirects(HttpClient.Redirect.NEVER)
         .build()
 
     override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
@@ -116,6 +117,7 @@ class MerebJenkinsJdkHttpTransport(
             statusCode = response.statusCode(),
             body = response.body(),
             effectiveUrl = response.uri().toString(),
+            headers = response.headers().map().mapKeys { it.key.lowercase() },
         )
     }
 }
@@ -168,12 +170,12 @@ class MerebJenkinsJenkinsClient(
                 jobPath = MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath),
                 name = body.string("name").orEmpty(),
                 displayName = body.string("fullName") ?: body.string("name").orEmpty(),
-                url = body.string("url").orEmpty(),
+                url = absoluteJobUrl(jobPath, body.string("url")),
                 color = body.string("color"),
                 lastBuildNumber = body.map("lastBuild")?.int("number"),
-                lastBuildUrl = body.map("lastBuild")?.string("url"),
+                lastBuildUrl = absoluteBuildUrl(jobPath, body.map("lastBuild")?.int("number"), body.map("lastBuild")?.string("url")),
                 lastSuccessfulBuildNumber = body.map("lastSuccessfulBuild")?.int("number"),
-                lastSuccessfulBuildUrl = body.map("lastSuccessfulBuild")?.string("url"),
+                lastSuccessfulBuildUrl = absoluteBuildUrl(jobPath, body.map("lastSuccessfulBuild")?.int("number"), body.map("lastSuccessfulBuild")?.string("url")),
             )
         }
     }
@@ -186,7 +188,7 @@ class MerebJenkinsJenkinsClient(
                 val pipelineSummary = requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/wfapi")
                 val runsResult = requestList("${normalizedBaseUrl}${encodeJobPath(jobPath)}/wfapi/runs")
                 val runs = when (runsResult) {
-                    is MerebJenkinsApiResult.Success -> runsResult.value.mapNotNull(::runFromPayload)
+                    is MerebJenkinsApiResult.Success -> runsResult.value.mapNotNull { runFromPayload(it, jobPath) }
                     is MerebJenkinsApiResult.Failure -> emptyList()
                 }
                 val pipelineAvailable = pipelineSummary is MerebJenkinsApiResult.Success || runsResult is MerebJenkinsApiResult.Success
@@ -211,7 +213,7 @@ class MerebJenkinsJenkinsClient(
 
     private fun fetchRunDescribe(jobPath: String, runId: String): MerebJenkinsRun? {
         return when (val result = requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/${encodeSegment(runId)}/wfapi/describe")) {
-            is MerebJenkinsApiResult.Success -> runFromPayload(result.value)
+            is MerebJenkinsApiResult.Success -> runFromPayload(result.value, jobPath)
             is MerebJenkinsApiResult.Failure -> null
         }
     }
@@ -232,7 +234,7 @@ class MerebJenkinsJenkinsClient(
     private fun fetchArtifacts(jobPath: String, runId: String): List<MerebJenkinsArtifactLink> {
         return when (val result = requestMap("${normalizedBaseUrl}${encodeJobPath(jobPath)}/${encodeSegment(runId)}/api/json?tree=url,artifacts[fileName,relativePath]")) {
             is MerebJenkinsApiResult.Success -> {
-                val buildUrl = result.value.string("url").orEmpty()
+                val buildUrl = absoluteBuildUrl(jobPath, runId.toIntOrNull(), result.value.string("url"))
                 result.value.list("artifacts")
                     .mapNotNull { payload ->
                         val map = payload as? Map<*, *> ?: return@mapNotNull null
@@ -291,7 +293,7 @@ class MerebJenkinsJenkinsClient(
         return runs.firstOrNull { it.running } ?: runs.firstOrNull()
     }
 
-    private fun runFromPayload(payload: Any?): MerebJenkinsRun? {
+    private fun runFromPayload(payload: Any?, jobPath: String): MerebJenkinsRun? {
         val map = payload as? Map<*, *> ?: return null
         val id = map.string("id") ?: return null
         val status = map.string("status") ?: "UNKNOWN"
@@ -299,7 +301,7 @@ class MerebJenkinsJenkinsClient(
             id = id,
             name = map.string("name") ?: "#$id",
             status = status,
-            url = map.string("url").orEmpty(),
+            url = absoluteBuildUrl(jobPath, id.toIntOrNull(), map.string("url")),
             durationMillis = map.long("durationMillis"),
             running = status.contains("IN_PROGRESS") || status.contains("PAUSED") || status.contains("QUEUED"),
             stages = map.list("stages").mapNotNull { stagePayload ->
@@ -315,20 +317,24 @@ class MerebJenkinsJenkinsClient(
     }
 
     private fun requestMap(url: String): MerebJenkinsApiResult<Map<String, Any?>> {
-        return request(url) { payload ->
+        return request(url, extractor = { payload ->
             @Suppress("UNCHECKED_CAST")
             payload as? Map<String, Any?> ?: payload.asMap()
-        }
+        })
     }
 
     private fun requestList(url: String): MerebJenkinsApiResult<List<Any?>> {
-        return request(url) { payload ->
+        return request(url, extractor = { payload ->
             @Suppress("UNCHECKED_CAST")
             payload as? List<Any?> ?: payload.asList()
-        }
+        })
     }
 
-    private fun <T> request(url: String, extractor: (Any?) -> T?): MerebJenkinsApiResult<T> {
+    private fun <T> request(
+        url: String,
+        extractor: (Any?) -> T?,
+        redirectDepth: Int = 0,
+    ): MerebJenkinsApiResult<T> {
         return try {
             val response = transport.get(url, headers())
             when (response.statusCode) {
@@ -347,6 +353,11 @@ class MerebJenkinsJenkinsClient(
                         MerebJenkinsApiResult.Success(extracted)
                     }
                 }
+                HttpURLConnection.HTTP_MOVED_PERM,
+                HttpURLConnection.HTTP_MOVED_TEMP,
+                HttpURLConnection.HTTP_SEE_OTHER,
+                307,
+                308 -> handleRedirect(url, response, extractor, redirectDepth)
                 HttpURLConnection.HTTP_UNAUTHORIZED, HttpURLConnection.HTTP_FORBIDDEN -> MerebJenkinsApiResult.Failure(
                     MerebJenkinsApiProblem(
                         kind = MerebJenkinsApiProblemKind.AUTH,
@@ -380,12 +391,102 @@ class MerebJenkinsJenkinsClient(
         }
     }
 
+    private fun <T> handleRedirect(
+        requestUrl: String,
+        response: MerebJenkinsHttpResponse,
+        extractor: (Any?) -> T?,
+        redirectDepth: Int,
+    ): MerebJenkinsApiResult<T> {
+        val location = response.headers["location"]?.firstOrNull()?.trim()
+        if (location.isNullOrBlank()) {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                    statusCode = response.statusCode,
+                    message = "Jenkins returned HTTP ${response.statusCode} without a redirect target.",
+                )
+            )
+        }
+        val redirectUrl = runCatching {
+            URI.create(response.effectiveUrl.ifBlank { requestUrl }).resolve(location).toString()
+        }.getOrElse {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                    statusCode = response.statusCode,
+                    message = "Jenkins redirected the request to an invalid URL: $location",
+                )
+            )
+        }
+        val redirectUri = runCatching { URI.create(redirectUrl) }.getOrNull()
+        val baseUri = runCatching { URI.create(normalizedBaseUrl.ensureTrailingSlash()) }.getOrNull()
+
+        if (redirectUri == null || baseUri == null) {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                    statusCode = response.statusCode,
+                    message = "Jenkins redirected the request to $redirectUrl",
+                )
+            )
+        }
+        if (looksLikeAuthRedirect(redirectUri)) {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.AUTH,
+                    statusCode = response.statusCode,
+                    message = "Jenkins redirected the API request to login at ${redirectUri.path.orEmpty()}. Check the saved credentials and your Jenkins OIDC/proxy setup.",
+                )
+            )
+        }
+        if (!sameOrigin(baseUri, redirectUri)) {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                    statusCode = response.statusCode,
+                    message = "Jenkins redirected the API request to $redirectUrl. Check JENKINS_PUBLIC_URL and any reverse proxy redirect rules.",
+                )
+            )
+        }
+        if (redirectDepth >= MAX_REDIRECTS) {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.UNKNOWN,
+                    statusCode = response.statusCode,
+                    message = "Jenkins kept redirecting API requests. Last redirect target: $redirectUrl",
+                )
+            )
+        }
+        return request(redirectUrl, extractor, redirectDepth + 1)
+    }
+
     private fun headers(): Map<String, String> = mapOf(
         "Accept" to "application/json",
         "Authorization" to authorizationHeader,
     )
 
+    private fun absoluteJobUrl(jobPath: String, candidateUrl: String?): String {
+        return absoluteUrl(candidateUrl) ?: buildJobUrl(jobPath)
+    }
+
+    private fun absoluteBuildUrl(jobPath: String, buildNumber: Int?, candidateUrl: String?): String {
+        return absoluteUrl(candidateUrl)
+            ?: buildNumber?.let { "${buildJobUrl(jobPath)}${encodeSegment(it.toString())}/" }
+            ?: buildJobUrl(jobPath)
+    }
+
+    private fun buildJobUrl(jobPath: String): String = normalizedBaseUrl + encodeJobPath(jobPath) + "/"
+
+    private fun absoluteUrl(candidateUrl: String?): String? {
+        val value = candidateUrl?.trim().orEmpty()
+        if (value.isBlank()) return null
+        return runCatching { URI.create(normalizedBaseUrl.ensureTrailingSlash()).resolve(value).toString() }
+            .getOrElse { value }
+    }
+
     companion object {
+        private const val MAX_REDIRECTS = 5
+
         fun encodeJobPath(jobPath: String): String = "/" + MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)
             .split('/')
             .filter { it.isNotBlank() }
@@ -399,6 +500,31 @@ class MerebJenkinsJenkinsClient(
                 className.contains("ComputedFolder") ||
                 className.contains("MultiBranchProject") ||
                 className.contains("OrganizationFolder")
+        }
+
+        private fun sameOrigin(baseUri: URI, redirectUri: URI): Boolean {
+            return baseUri.scheme.equals(redirectUri.scheme, ignoreCase = true) &&
+                baseUri.host.equals(redirectUri.host, ignoreCase = true) &&
+                normalizedPort(baseUri) == normalizedPort(redirectUri)
+        }
+
+        private fun normalizedPort(uri: URI): Int = when {
+            uri.port >= 0 -> uri.port
+            uri.scheme.equals("https", ignoreCase = true) -> 443
+            uri.scheme.equals("http", ignoreCase = true) -> 80
+            else -> -1
+        }
+
+        private fun looksLikeAuthRedirect(uri: URI): Boolean {
+            val path = uri.path.orEmpty().lowercase()
+            val query = uri.query.orEmpty().lowercase()
+            return path.contains("/login") ||
+                path.contains("/securityrealm/") ||
+                path.contains("/oauth") ||
+                path.contains("/openid") ||
+                path.contains("/sso") ||
+                path.contains("/realms/") ||
+                query.contains("from=") && path.contains("/login")
         }
     }
 }
