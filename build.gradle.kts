@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "org.mereb.intellij"
-version = "0.1.14"
+version = "0.1.15"
 
 val pluginSinceBuild = "242"
 val pluginUntilBuild = "261.*"

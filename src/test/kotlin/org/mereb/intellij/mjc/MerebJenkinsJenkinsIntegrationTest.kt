@@ -297,6 +297,49 @@ class MerebJenkinsJenkinsIntegrationTest {
         assertEquals(MerebJenkinsJobVariantSelectionMode.MAIN_FALLBACK, fallback.mode)
     }
 
+    @Test
+    fun `job resolver auto selects main job from matching multibranch family parent`() {
+        val service = MerebJenkinsJenkinsStateService()
+        val transport = fakeTransport(
+            "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/job/main/api/json?tree=name,fullName,url,color,lastBuild[number,url],lastSuccessfulBuild[number,url]" to ok(
+                """
+                {"name":"main","fullName":"RMHY/Mereb/backend/svc-ops/main","url":"https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/job/main/","color":"blue"}
+                """.trimIndent()
+            ),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+        val target = MerebJenkinsWorkspaceTarget(
+            projectRootPath = "/tmp/ws/services/svc-ops",
+            configFilePath = "/tmp/ws/services/svc-ops/.ci/ci.mjc",
+        )
+        val visibleJobs = listOf(
+            MerebJenkinsJobCandidate(
+                "RMHY/Mereb/backend/svc-ops/main",
+                "RMHY/Mereb/backend/svc-ops/main",
+                "main",
+                "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/job/main/",
+            ),
+            MerebJenkinsJobCandidate(
+                "RMHY/Mereb/backend/svc-ops/PR-42",
+                "RMHY/Mereb/backend/svc-ops/PR-42",
+                "PR-42",
+                "https://jenkins.example.com/job/RMHY/job/Mereb/job/backend/job/svc-ops/job/PR-42/",
+            ),
+        )
+
+        val resolution = MerebJenkinsJobResolver.resolveWithVisibleJobs(
+            stateService = service,
+            client = client,
+            workspaceTarget = target,
+            workspaceBasePath = "/tmp/ws",
+            visibleJobs = visibleJobs,
+        )
+
+        val resolved = assertIs<MerebJenkinsJobResolution.Resolved>(resolution)
+        assertTrue(resolved.autoSelected)
+        assertEquals("RMHY/Mereb/backend/svc-ops/main", resolved.mapping.jobPath)
+    }
+
     private fun fakeTransport(vararg responses: Pair<String, MerebJenkinsHttpResponse>): MerebJenkinsHttpTransport {
         val byUrl = responses.toMap()
         return MerebJenkinsHttpTransport { url, _ ->

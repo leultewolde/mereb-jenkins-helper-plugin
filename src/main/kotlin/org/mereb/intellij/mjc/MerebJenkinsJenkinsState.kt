@@ -106,49 +106,67 @@ data class MerebJenkinsPersistedState(
 @State(name = "MerebJenkinsJenkinsState", storages = [Storage("merebJenkinsHelper.xml")])
 class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPersistedState> {
     private var state = MerebJenkinsPersistedState()
+    private val stateLock = Any()
 
-    override fun getState(): MerebJenkinsPersistedState = state
-
-    override fun loadState(state: MerebJenkinsPersistedState) {
-        this.state = state.copy(
-            baseUrl = normalizeBaseUrl(state.baseUrl).ifBlank { DEFAULT_BASE_URL },
-            username = state.username.trim(),
-            lastConnectionStatus = state.lastConnectionStatus.ifBlank { MerebJenkinsConnectionStatus.DISCONNECTED.name },
-            lastErrorMessage = state.lastErrorMessage.trim(),
-            lastRequestUrl = state.lastRequestUrl.trim(),
-            lastRedirectTarget = state.lastRedirectTarget.trim(),
-            lastRedirectRelation = state.lastRedirectRelation.trim(),
+    override fun getState(): MerebJenkinsPersistedState = synchronized(stateLock) {
+        state.copy(
             jobMappings = state.jobMappings
-                .filter { it.projectRootPath.isNotBlank() && it.jobPath.isNotBlank() }
                 .map {
                     MerebJenkinsJobMappingState(
-                        projectRootPath = it.projectRootPath.trim(),
-                        jobPath = normalizeJobPath(it.jobPath),
-                        jobDisplayName = it.jobDisplayName.ifBlank { normalizeJobPath(it.jobPath) },
+                        projectRootPath = it.projectRootPath,
+                        jobPath = it.jobPath,
+                        jobDisplayName = it.jobDisplayName,
                         resolvedAt = it.resolvedAt,
                     )
                 }
-                .distinctBy { it.projectRootPath }
                 .toMutableList()
         )
     }
 
-    fun snapshot(): MerebJenkinsConnectionSnapshot {
-        val status = when (state.lastConnectionStatus.trim()) {
-            "UNREACHABLE" -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
-            else -> runCatching { MerebJenkinsConnectionStatus.valueOf(state.lastConnectionStatus) }
-                .getOrDefault(MerebJenkinsConnectionStatus.DISCONNECTED)
+    override fun loadState(state: MerebJenkinsPersistedState) {
+        synchronized(stateLock) {
+            this.state = state.copy(
+                baseUrl = normalizeBaseUrl(state.baseUrl).ifBlank { DEFAULT_BASE_URL },
+                username = state.username.trim(),
+                lastConnectionStatus = state.lastConnectionStatus.ifBlank { MerebJenkinsConnectionStatus.DISCONNECTED.name },
+                lastErrorMessage = state.lastErrorMessage.trim(),
+                lastRequestUrl = state.lastRequestUrl.trim(),
+                lastRedirectTarget = state.lastRedirectTarget.trim(),
+                lastRedirectRelation = state.lastRedirectRelation.trim(),
+                jobMappings = state.jobMappings
+                    .filter { it.projectRootPath.isNotBlank() && it.jobPath.isNotBlank() }
+                    .map {
+                        MerebJenkinsJobMappingState(
+                            projectRootPath = it.projectRootPath.trim(),
+                            jobPath = normalizeJobPath(it.jobPath),
+                            jobDisplayName = it.jobDisplayName.ifBlank { normalizeJobPath(it.jobPath) },
+                            resolvedAt = it.resolvedAt,
+                        )
+                    }
+                    .distinctBy { it.projectRootPath }
+                    .toMutableList()
+            )
         }
-        return MerebJenkinsConnectionSnapshot(
-            baseUrl = normalizeBaseUrl(state.baseUrl).ifBlank { DEFAULT_BASE_URL },
-            username = state.username.trim(),
-            status = status,
-            lastValidatedAt = state.lastValidatedAt.takeIf { it > 0L },
-            lastErrorMessage = state.lastErrorMessage.ifBlank { null },
-            lastRequestUrl = state.lastRequestUrl.ifBlank { null },
-            lastRedirectTarget = state.lastRedirectTarget.ifBlank { null },
-            lastRedirectRelation = state.lastRedirectRelation.ifBlank { null },
-        )
+    }
+
+    fun snapshot(): MerebJenkinsConnectionSnapshot {
+        synchronized(stateLock) {
+            val status = when (state.lastConnectionStatus.trim()) {
+                "UNREACHABLE" -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
+                else -> runCatching { MerebJenkinsConnectionStatus.valueOf(state.lastConnectionStatus) }
+                    .getOrDefault(MerebJenkinsConnectionStatus.DISCONNECTED)
+            }
+            return MerebJenkinsConnectionSnapshot(
+                baseUrl = normalizeBaseUrl(state.baseUrl).ifBlank { DEFAULT_BASE_URL },
+                username = state.username.trim(),
+                status = status,
+                lastValidatedAt = state.lastValidatedAt.takeIf { it > 0L },
+                lastErrorMessage = state.lastErrorMessage.ifBlank { null },
+                lastRequestUrl = state.lastRequestUrl.ifBlank { null },
+                lastRedirectTarget = state.lastRedirectTarget.ifBlank { null },
+                lastRedirectRelation = state.lastRedirectRelation.ifBlank { null },
+            )
+        }
     }
 
     fun saveConnection(baseUrl: String, username: String, token: String?) {
@@ -156,14 +174,16 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
         val normalizedUsername = username.trim()
         val previous = snapshot()
 
-        state.baseUrl = normalizedBaseUrl
-        state.username = normalizedUsername
-        state.lastConnectionStatus = MerebJenkinsConnectionStatus.DISCONNECTED.name
-        state.lastErrorMessage = ""
-        state.lastValidatedAt = 0L
-        state.lastRequestUrl = ""
-        state.lastRedirectTarget = ""
-        state.lastRedirectRelation = ""
+        synchronized(stateLock) {
+            state.baseUrl = normalizedBaseUrl
+            state.username = normalizedUsername
+            state.lastConnectionStatus = MerebJenkinsConnectionStatus.DISCONNECTED.name
+            state.lastErrorMessage = ""
+            state.lastValidatedAt = 0L
+            state.lastRequestUrl = ""
+            state.lastRedirectTarget = ""
+            state.lastRedirectRelation = ""
+        }
 
         val baseUrlChanged = previous.baseUrl != normalizedBaseUrl || previous.username != normalizedUsername
         if (baseUrlChanged) {
@@ -188,12 +208,14 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
         redirectTarget: String? = null,
         redirectRelation: String? = null,
     ) {
-        state.lastConnectionStatus = status.name
-        state.lastErrorMessage = errorMessage.orEmpty()
-        state.lastValidatedAt = validatedAt ?: if (status == MerebJenkinsConnectionStatus.CONNECTED) System.currentTimeMillis() else state.lastValidatedAt
-        state.lastRequestUrl = requestUrl.orEmpty()
-        state.lastRedirectTarget = redirectTarget.orEmpty()
-        state.lastRedirectRelation = redirectRelation.orEmpty()
+        synchronized(stateLock) {
+            state.lastConnectionStatus = status.name
+            state.lastErrorMessage = errorMessage.orEmpty()
+            state.lastValidatedAt = validatedAt ?: if (status == MerebJenkinsConnectionStatus.CONNECTED) System.currentTimeMillis() else state.lastValidatedAt
+            state.lastRequestUrl = requestUrl.orEmpty()
+            state.lastRedirectTarget = redirectTarget.orEmpty()
+            state.lastRedirectRelation = redirectRelation.orEmpty()
+        }
     }
 
     fun hasStoredToken(baseUrl: String = snapshot().baseUrl, username: String = snapshot().username): Boolean {
@@ -219,35 +241,51 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
 
     fun getJobMapping(projectRootPath: String): MerebJenkinsJobMapping? {
         val normalizedRoot = projectRootPath.trim()
-        return state.jobMappings.firstOrNull { it.projectRootPath == normalizedRoot }?.let {
-            MerebJenkinsJobMapping(
-                projectRootPath = it.projectRootPath,
-                jobPath = it.jobPath,
-                jobDisplayName = it.jobDisplayName,
-                resolvedAt = it.resolvedAt,
-            )
+        return synchronized(stateLock) {
+            state.jobMappings.firstOrNull { it.projectRootPath == normalizedRoot }?.let {
+                MerebJenkinsJobMapping(
+                    projectRootPath = it.projectRootPath,
+                    jobPath = it.jobPath,
+                    jobDisplayName = it.jobDisplayName,
+                    resolvedAt = it.resolvedAt,
+                )
+            }
         }
     }
 
     fun rememberJobMapping(projectRootPath: String, jobPath: String, jobDisplayName: String) {
         val normalizedRoot = projectRootPath.trim()
         val normalizedJobPath = normalizeJobPath(jobPath)
-        state.jobMappings.removeIf { it.projectRootPath == normalizedRoot }
-        state.jobMappings += MerebJenkinsJobMappingState(
-            projectRootPath = normalizedRoot,
-            jobPath = normalizedJobPath,
-            jobDisplayName = jobDisplayName.ifBlank { normalizedJobPath },
-            resolvedAt = System.currentTimeMillis(),
-        )
+        synchronized(stateLock) {
+            state.jobMappings = state.jobMappings
+                .filterNot { it.projectRootPath == normalizedRoot }
+                .toMutableList()
+                .apply {
+                    add(
+                        MerebJenkinsJobMappingState(
+                            projectRootPath = normalizedRoot,
+                            jobPath = normalizedJobPath,
+                            jobDisplayName = jobDisplayName.ifBlank { normalizedJobPath },
+                            resolvedAt = System.currentTimeMillis(),
+                        )
+                    )
+                }
+        }
     }
 
     fun clearJobMapping(projectRootPath: String) {
         val normalizedRoot = projectRootPath.trim()
-        state.jobMappings.removeIf { it.projectRootPath == normalizedRoot }
+        synchronized(stateLock) {
+            state.jobMappings = state.jobMappings
+                .filterNot { it.projectRootPath == normalizedRoot }
+                .toMutableList()
+        }
     }
 
     fun clearJobMappings() {
-        state.jobMappings.clear()
+        synchronized(stateLock) {
+            state.jobMappings = mutableListOf()
+        }
     }
 
     companion object {

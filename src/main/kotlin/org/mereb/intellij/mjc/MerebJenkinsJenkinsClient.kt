@@ -29,6 +29,7 @@ enum class MerebJenkinsJobMatchKind {
     EXACT_ROOT_NAME,
     EXACT_WORKSPACE_LABEL,
     EXACT_PATH_SUFFIX,
+    EXACT_BRANCH_FAMILY_PARENT,
     CONTAINS,
 }
 

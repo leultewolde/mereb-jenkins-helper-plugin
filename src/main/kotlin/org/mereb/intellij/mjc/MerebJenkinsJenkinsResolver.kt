@@ -109,6 +109,17 @@ object MerebJenkinsJobResolver {
             return MerebJenkinsJobResolution.Resolved(mapping, autoSelected = true, matches = matches)
         }
 
+        branchFamilyWinner(exactMatches)?.let { winner ->
+            val mapping = MerebJenkinsJobMapping(
+                projectRootPath = projectRootPath,
+                jobPath = winner.jobPath,
+                jobDisplayName = winner.jobDisplayName,
+                resolvedAt = System.currentTimeMillis(),
+            )
+            stateService.rememberJobMapping(projectRootPath, winner.jobPath, winner.jobDisplayName)
+            return MerebJenkinsJobResolution.Resolved(mapping, autoSelected = true, matches = matches)
+        }
+
         return MerebJenkinsJobResolution.NeedsSelection(matches)
     }
 
@@ -126,11 +137,14 @@ object MerebJenkinsJobResolver {
         return candidates.mapNotNull { candidate ->
             val candidateLeafPath = normalizePathLabel(candidate.leafName)
             val candidatePath = normalizePathLabel(candidate.jobPath)
+            val candidateParentPath = normalizePathLabel(parentJobPath(candidate.jobPath))
             val candidateText = normalizeTextLabel(candidate.jobDisplayName + " " + candidate.jobPath)
             when {
                 candidateLeafPath == rootNameLabel && rootNameLabel.isNotBlank() -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_ROOT_NAME, 400)
                 candidatePath == workspacePathLabel && workspacePathLabel.isNotBlank() -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_WORKSPACE_LABEL, 390)
                 workspacePathLabel.isNotBlank() && candidatePath.endsWith("/$workspacePathLabel") -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_PATH_SUFFIX, 380)
+                rootNameLabel.isNotBlank() && (candidateParentPath == rootNameLabel || candidateParentPath.endsWith("/$rootNameLabel")) ->
+                    MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.EXACT_BRANCH_FAMILY_PARENT, 385)
                 rootTokens.isNotBlank() && candidateText.contains(rootTokens) -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.CONTAINS, 120)
                 workspaceTokens.isNotBlank() && candidateText.contains(workspaceTokens) -> MerebJenkinsJobCandidateMatch(candidate, MerebJenkinsJobMatchKind.CONTAINS, 110)
                 else -> null
@@ -307,6 +321,16 @@ object MerebJenkinsJobResolver {
             normalized.startsWith("pr-") -> "1-$normalized"
             else -> "2-$normalized"
         }
+    }
+
+    private fun branchFamilyWinner(matches: List<MerebJenkinsJobCandidateMatch>): MerebJenkinsJobCandidate? {
+        if (matches.size < 2) return null
+        val candidates = matches.map { it.candidate }
+        val parentPaths = candidates.map { parentJobPath(it.jobPath) }.distinct()
+        if (parentPaths.size != 1) return null
+        if (!candidates.all { isBranchLikeName(it.leafName) }) return null
+        return candidates.firstOrNull { MAIN_BRANCH_ALIASES.contains(normalizeBranchName(it.leafName)) }
+            ?: candidates.sortedBy { variantSortKey(it.leafName) }.firstOrNull()
     }
 
     private val MAIN_BRANCH_ALIASES = setOf("main", "master", "trunk")
