@@ -1,0 +1,38 @@
+<idea-plugin>
+    <id>org.mereb.intellij.mjc</id>
+    <name>Mereb Jenkins Helper</name>
+    <vendor>Mereb</vendor>
+    <description><![CDATA[
+    YAML-backed editor support for Mereb Jenkins configuration files. Adds <code>.mjc</code>
+    file handling, schema validation, and guidance for migrating away from legacy filenames.
+  ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.json</depends>
+    <depends>org.jetbrains.plugins.yaml</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <fileType
+                name="Mereb Jenkins Configuration"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigurationFileType"
+                fieldName="INSTANCE"
+                extensions="mjc"/>
+        <jsonSchemaProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
+        <localInspection
+                language="YAML"
+                shortName="LegacyMerebJenkinsConfigFilename"
+                displayName="Legacy Mereb Jenkins config filename"
+                groupName="Mereb Jenkins"
+                enabledByDefault="true"
+                level="WEAK WARNING"
+                implementationClass="org.mereb.intellij.mjc.LegacyMerebJenkinsConfigInspection"/>
+        <localInspection
+                language="YAML"
+                shortName="MerebJenkinsConfigSemantics"
+                displayName="Mereb Jenkins config semantics"
+                groupName="Mereb Jenkins"
+                enabledByDefault="true"
+                level="WARNING"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigSemanticInspection"/>
+    </extensions>
+</idea-plugin>
