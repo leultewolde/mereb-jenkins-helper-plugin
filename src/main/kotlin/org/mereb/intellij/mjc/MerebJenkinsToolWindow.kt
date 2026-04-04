@@ -1,8 +1,10 @@
 package org.mereb.intellij.mjc
 
+import com.intellij.ide.BrowserUtil
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.components.service
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.fileEditor.FileDocumentManager
@@ -35,6 +37,7 @@ import java.awt.BorderLayout
 import java.awt.Dimension
 import java.awt.FlowLayout
 import java.awt.GridLayout
+import java.awt.event.HierarchyEvent
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.nio.file.Paths
@@ -52,7 +55,7 @@ import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 
 class MerebJenkinsToolWindowFactory : ToolWindowFactory, DumbAware {
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
-        val panel = MerebJenkinsToolWindowPanel(project)
+        val panel = MerebJenkinsToolWindowPanel(project, toolWindow)
         val content = ContentFactory.getInstance().createContent(panel.component, "", false)
         toolWindow.contentManager.addContent(content)
         Disposer.register(content, panel)
@@ -65,20 +68,29 @@ class MerebJenkinsToolWindowFactory : ToolWindowFactory, DumbAware {
 
 private class MerebJenkinsToolWindowPanel(
     private val project: Project,
+    private val toolWindow: ToolWindow,
 ) : Disposable {
     private val analyzer = MerebJenkinsConfigAnalyzer()
     private val upstreamChecker = MerebJenkinsUpstreamChecker()
+    private val jenkinsStateService = service<MerebJenkinsJenkinsStateService>()
     private val upstreamRefreshVersion = AtomicInteger()
+    private val jenkinsRefreshVersion = AtomicInteger()
     private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
+    private val jenkinsPollAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
 
     @Volatile private var disposed = false
     @Volatile private var upstreamRefreshTask: Future<*>? = null
+    @Volatile private var jenkinsRefreshTask: Future<*>? = null
     private var workspaceRescanRequested = true
     private var currentVirtualFile: VirtualFile? = null
     private var currentAnalysis: MerebJenkinsAnalysisResult? = null
     private var currentTarget: MerebJenkinsWorkspaceTarget? = null
     private var availableTargets: List<MerebJenkinsWorkspaceTarget> = emptyList()
     private var updatingTargetSelector = false
+    private var currentJobMapping: MerebJenkinsJobMapping? = null
+    private var currentLiveData: MerebJenkinsLiveJobData? = null
+    private var currentJenkinsProblem: MerebJenkinsApiProblem? = null
+    private var pendingJobSelectionRoots: MutableSet<String> = linkedSetOf()
 
     private val root = JPanel(BorderLayout(0, 12)).apply {
         border = JBUI.Borders.empty(12)
@@ -96,6 +108,10 @@ private class MerebJenkinsToolWindowPanel(
     private val openJenkinsfileButton = JButton("Open Jenkinsfile")
     private val migrateButton = JButton("Migrate")
     private val checkUpstreamButton = JButton("Check Upstream Schema")
+    private val connectJenkinsButton = JButton("Connect Jenkins")
+    private val remapJobButton = JButton("Remap Job")
+    private val refreshJenkinsButton = JButton("Refresh Live Data")
+    private val openInJenkinsButton = JButton("Open in Jenkins")
 
     private val recipeCard = StatusCard("Recipe")
     private val imageCard = StatusCard("Image")
@@ -103,20 +119,37 @@ private class MerebJenkinsToolWindowPanel(
     private val relationCard = StatusCard("Relations")
     private val noticeCard = StatusCard("Notices")
     private val fixCard = StatusCard("Safe Fixes")
+    private val jenkinsConnectionCard = StatusCard("Jenkins")
+    private val jenkinsJobCard = StatusCard("Job")
+    private val jenkinsBuildCard = StatusCard("Live Build")
 
     private val findingsModel = DefaultListModel<MerebJenkinsFinding>()
     private val sectionsModel = DefaultListModel<MerebJenkinsSectionState>()
     private val flowModel = DefaultListModel<MerebJenkinsFlowStep>()
     private val relationsModel = DefaultListModel<MerebJenkinsRelation>()
+    private val jenkinsRunsModel = DefaultListModel<MerebJenkinsRun>()
+    private val jenkinsStagesModel = DefaultListModel<MerebJenkinsStage>()
+    private val jenkinsPendingModel = DefaultListModel<MerebJenkinsPendingInput>()
+    private val jenkinsArtifactsModel = DefaultListModel<MerebJenkinsArtifactLink>()
 
     private val findingsList = JBList(findingsModel)
     private val sectionsList = JBList(sectionsModel)
     private val flowList = JBList(flowModel)
     private val relationsList = JBList(relationsModel)
+    private val jenkinsRunsList = JBList(jenkinsRunsModel)
+    private val jenkinsStagesList = JBList(jenkinsStagesModel)
+    private val jenkinsPendingList = JBList(jenkinsPendingModel)
+    private val jenkinsArtifactsList = JBList(jenkinsArtifactsModel)
 
     private val upstreamStateLabel = JBLabel("Schema status: idle")
     private val upstreamHashesLabel = JBLabel("Run a manual check to compare bundled and live schema hashes.")
     private val upstreamErrorLabel = JBLabel("").apply {
+        foreground = toneColor(Tone.ERROR)
+    }
+    private val jenkinsStatusLabel = JBLabel("Jenkins is not connected.")
+    private val jenkinsJobLabel = JBLabel("Mapped job: none")
+    private val jenkinsRefreshLabel = JBLabel("Last refresh: never")
+    private val jenkinsErrorLabel = JBLabel("").apply {
         foreground = toneColor(Tone.ERROR)
     }
 
@@ -124,25 +157,48 @@ private class MerebJenkinsToolWindowPanel(
         get() = root
 
     init {
-        refreshButton.addActionListener { refreshCurrentFile() }
+        refreshButton.addActionListener {
+            refreshCurrentFile()
+            scheduleJenkinsRefresh(delayMs = 0, manual = true)
+        }
         safeFixesButton.addActionListener { applySafeFixes() }
         recipeButton.addActionListener { applyRecipeFix() }
         openJenkinsfileButton.addActionListener { openJenkinsfile() }
         migrateButton.addActionListener { runMigration() }
         checkUpstreamButton.addActionListener { refreshUpstream() }
+        connectJenkinsButton.addActionListener {
+            MerebJenkinsConnectionSupport.showConnectionDialog(project) {
+                renderJenkinsDisconnected("Jenkins connection saved. Refreshing live data…")
+                scheduleJenkinsRefresh(delayMs = 0, manual = true)
+            }
+        }
+        remapJobButton.addActionListener { scheduleJenkinsRefresh(delayMs = 0, forceRemap = true, manual = true) }
+        refreshJenkinsButton.addActionListener { scheduleJenkinsRefresh(delayMs = 0, manual = true) }
+        openInJenkinsButton.addActionListener { openInJenkins() }
         targetSelector.addActionListener {
             if (updatingTargetSelector) return@addActionListener
             currentTarget = targetSelector.selectedItem as? MerebJenkinsWorkspaceTarget
             scheduleRefresh(delayMs = 0)
+            scheduleJenkinsRefresh(delayMs = 0)
         }
 
         configureLists()
         configureTargetSelector()
         buildUi()
+        root.addHierarchyListener { event ->
+            if ((event.changeFlags and HierarchyEvent.SHOWING_CHANGED.toLong()) != 0L) {
+                if (root.isShowing && toolWindow.isVisible) {
+                    scheduleJenkinsRefresh(delayMs = 0)
+                } else {
+                    jenkinsPollAlarm.cancelAllRequests()
+                }
+            }
+        }
 
         project.messageBus.connect(this).subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER, object : FileEditorManagerListener {
             override fun selectionChanged(event: FileEditorManagerEvent) {
                 scheduleRefresh()
+                scheduleJenkinsRefresh()
             }
         })
         project.messageBus.connect(this).subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
@@ -162,11 +218,13 @@ private class MerebJenkinsToolWindowPanel(
                 val needsWorkspaceRescan = isWorkspaceTargetChange(file.path)
                 if (needsWorkspaceRescan || (target != null && target.isTrackedArtifact(file.path))) {
                     scheduleRefresh(rescanWorkspace = needsWorkspaceRescan)
+                    scheduleJenkinsRefresh(rescanWorkspace = needsWorkspaceRescan)
                 }
             }
         }, this)
 
         refreshCurrentFile()
+        renderJenkinsDisconnected("Connect to Jenkins to show live build data for this project.")
         renderUpstreamIdle()
     }
 
@@ -175,6 +233,7 @@ private class MerebJenkinsToolWindowPanel(
 
         val tabs = JBTabbedPane()
         tabs.addTab("Overview", buildOverviewTab())
+        tabs.addTab("Jenkins", buildJenkinsTab())
         tabs.addTab("Flow", buildFlowTab())
         tabs.addTab("Relations", buildRelationsTab())
         tabs.addTab("Upstream", buildUpstreamTab())
@@ -201,13 +260,16 @@ private class MerebJenkinsToolWindowPanel(
     }
 
     private fun buildOverviewTab(): JComponent {
-        val cards = JPanel(GridLayout(2, 3, 10, 10)).apply {
+        val cards = JPanel(GridLayout(3, 3, 10, 10)).apply {
             add(recipeCard)
             add(imageCard)
             add(releaseCard)
             add(relationCard)
             add(noticeCard)
             add(fixCard)
+            add(jenkinsConnectionCard)
+            add(jenkinsJobCard)
+            add(jenkinsBuildCard)
         }
 
         val findingsPanel = titledPanel("Findings", JBScrollPane(findingsList))
@@ -228,6 +290,30 @@ private class MerebJenkinsToolWindowPanel(
             add(center, BorderLayout.CENTER)
             add(actions, BorderLayout.SOUTH)
         }
+    }
+
+    private fun buildJenkinsTab(): JComponent = JPanel(BorderLayout(0, 10)).apply {
+        val top = JPanel(GridLayout(4, 1, 0, 6)).apply {
+            add(jenkinsStatusLabel)
+            add(jenkinsJobLabel)
+            add(jenkinsRefreshLabel)
+            add(jenkinsErrorLabel)
+        }
+        val center = JPanel(GridLayout(2, 2, 10, 10)).apply {
+            add(titledPanel("Recent Runs", JBScrollPane(jenkinsRunsList)))
+            add(titledPanel("Stages", JBScrollPane(jenkinsStagesList)))
+            add(titledPanel("Pending Input", JBScrollPane(jenkinsPendingList)))
+            add(titledPanel("Artifacts", JBScrollPane(jenkinsArtifactsList)))
+        }
+        val actions = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
+            add(connectJenkinsButton)
+            add(remapJobButton)
+            add(refreshJenkinsButton)
+            add(openInJenkinsButton)
+        }
+        add(top, BorderLayout.NORTH)
+        add(center, BorderLayout.CENTER)
+        add(actions, BorderLayout.SOUTH)
     }
 
     private fun buildFlowTab(): JComponent = JPanel(BorderLayout(0, 8)).apply {
@@ -315,6 +401,60 @@ private class MerebJenkinsToolWindowPanel(
             }
         }
 
+        jenkinsRunsList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsRun>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsRun>,
+                value: MerebJenkinsRun?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.name, attrsForBuildStatus(value.status))
+                append("  ${value.status.lowercase().replace('_', ' ')}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+        }
+
+        jenkinsStagesList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsStage>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsStage>,
+                value: MerebJenkinsStage?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.name, attrsForBuildStatus(value.status))
+                append("  ${value.status.lowercase().replace('_', ' ')}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+            }
+        }
+
+        jenkinsPendingList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsPendingInput>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsPendingInput>,
+                value: MerebJenkinsPendingInput?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.message, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+            }
+        }
+
+        jenkinsArtifactsList.cellRenderer = object : ColoredListCellRenderer<MerebJenkinsArtifactLink>() {
+            override fun customizeCellRenderer(
+                list: JList<out MerebJenkinsArtifactLink>,
+                value: MerebJenkinsArtifactLink?,
+                index: Int,
+                selected: Boolean,
+                hasFocus: Boolean,
+            ) {
+                if (value == null) return
+                append(value.label, SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            }
+        }
+
         findingsList.addMouseListener(doubleClickListener {
             currentAnalysis?.let { analysis ->
                 val finding = findingsList.selectedValue ?: return@doubleClickListener
@@ -338,6 +478,14 @@ private class MerebJenkinsToolWindowPanel(
                 val relation = relationsList.selectedValue ?: return@doubleClickListener
                 navigate(relation.targetPath ?: relation.sourcePath, analysis)
             }
+        })
+        jenkinsRunsList.addMouseListener(doubleClickListener {
+            val run = jenkinsRunsList.selectedValue ?: return@doubleClickListener
+            BrowserUtil.browse(run.url)
+        })
+        jenkinsArtifactsList.addMouseListener(doubleClickListener {
+            val artifact = jenkinsArtifactsList.selectedValue ?: return@doubleClickListener
+            BrowserUtil.browse(artifact.url)
         })
     }
 
@@ -375,6 +523,7 @@ private class MerebJenkinsToolWindowPanel(
             clearModels()
             updateCards(null)
             updateButtons()
+            renderJenkinsDisconnected("No Mereb Jenkins project detected in this workspace.")
             return
         }
 
@@ -393,6 +542,7 @@ private class MerebJenkinsToolWindowPanel(
         refill(relationsModel, analysis.summary.relations)
         updateCards(analysis)
         updateButtons()
+        scheduleJenkinsRefresh(delayMs = 0)
     }
 
     private fun refreshUpstream() {
@@ -420,6 +570,272 @@ private class MerebJenkinsToolWindowPanel(
                 upstreamErrorLabel.text = status.error ?: ""
             }, ModalityState.any(), Condition<Any?> { isDisposedOrStale(refreshId) })
         }
+    }
+
+    private fun refreshJenkins(forceRemap: Boolean = false, manual: Boolean = false) {
+        if (disposed || project.isDisposed) return
+        if (!manual && !canPollJenkins()) return
+        resolveWorkspaceFocus()
+        val target = currentTarget ?: run {
+            renderJenkinsDisconnected("No Mereb Jenkins project detected in this workspace.")
+            return
+        }
+        val snapshot = jenkinsStateService.snapshot()
+        if (!snapshot.isConfigured) {
+            renderJenkinsDisconnected("Connect to Jenkins to load live build data for this project.")
+            return
+        }
+
+        val token = jenkinsStateService.resolveToken(snapshot.baseUrl, snapshot.username)
+        if (token.isNullOrBlank()) {
+            renderJenkinsDisconnected("No Jenkins API token is stored for the current Jenkins connection.")
+            return
+        }
+
+        jenkinsStatusLabel.text = "Refreshing Jenkins live data…"
+        jenkinsErrorLabel.text = ""
+        jenkinsRefreshTask?.cancel(true)
+        val refreshId = jenkinsRefreshVersion.incrementAndGet()
+        val application = ApplicationManager.getApplication()
+
+        jenkinsRefreshTask = application.executeOnPooledThread {
+            if (isDisposedOrStaleJenkins(refreshId)) return@executeOnPooledThread
+            val client = MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token)
+            when (val resolution = MerebJenkinsJobResolver.resolve(jenkinsStateService, client, target, project.basePath, forceRemap = forceRemap)) {
+                is MerebJenkinsJobResolution.Resolved -> {
+                    when (val live = client.fetchLiveJobData(resolution.mapping.jobPath)) {
+                        is MerebJenkinsApiResult.Success -> {
+                            jenkinsStateService.recordConnectionStatus(MerebJenkinsConnectionStatus.CONNECTED, null, System.currentTimeMillis())
+                            application.invokeLater({
+                                if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                                pendingJobSelectionRoots.remove(target.projectRootPath)
+                                currentJobMapping = resolution.mapping
+                                currentLiveData = live.value
+                                currentJenkinsProblem = null
+                                renderJenkinsLive(snapshot, resolution.mapping, live.value, resolution.autoSelected)
+                                scheduleNextJenkinsPoll()
+                            }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                        }
+                        is MerebJenkinsApiResult.Failure -> {
+                            if (live.problem.kind == MerebJenkinsApiProblemKind.NOT_FOUND && !forceRemap) {
+                                jenkinsStateService.clearJobMapping(target.projectRootPath)
+                                application.invokeLater({
+                                    if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                                    scheduleJenkinsRefresh(delayMs = 0, forceRemap = true, manual = manual)
+                                }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                            } else {
+                                recordConnectionProblem(live.problem)
+                                application.invokeLater({
+                                    if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                                    currentJenkinsProblem = live.problem
+                                    renderJenkinsProblem(snapshot, live.problem)
+                                }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                            }
+                        }
+                    }
+                }
+                is MerebJenkinsJobResolution.NeedsSelection -> {
+                    application.invokeLater({
+                        if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                        promptForJobSelection(target, resolution.matches, forcePrompt = manual || forceRemap)
+                    }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                }
+                is MerebJenkinsJobResolution.NoMatch -> {
+                    application.invokeLater({
+                        if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                        renderJenkinsNoMatch(resolution.searchedLabels)
+                    }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                }
+                is MerebJenkinsJobResolution.Failure -> {
+                    recordConnectionProblem(resolution.problem)
+                    application.invokeLater({
+                        if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                        currentJenkinsProblem = resolution.problem
+                        renderJenkinsProblem(snapshot, resolution.problem)
+                    }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                }
+            }
+        }
+    }
+
+    private fun promptForJobSelection(
+        target: MerebJenkinsWorkspaceTarget,
+        matches: List<MerebJenkinsJobCandidateMatch>,
+        forcePrompt: Boolean,
+    ) {
+        if (!forcePrompt && pendingJobSelectionRoots.contains(target.projectRootPath)) {
+            renderJenkinsNeedsSelection(matches.size)
+            return
+        }
+        val dialog = MerebJenkinsJobPickerDialog(project, workspaceTargetLabel(target), matches)
+        if (dialog.showAndGet()) {
+            val selected = dialog.selectedCandidate
+            if (selected != null) {
+                pendingJobSelectionRoots.remove(target.projectRootPath)
+                jenkinsStateService.rememberJobMapping(target.projectRootPath, selected.jobPath, selected.jobDisplayName)
+                scheduleJenkinsRefresh(delayMs = 0, manual = true)
+                return
+            }
+        }
+        pendingJobSelectionRoots += target.projectRootPath
+        renderJenkinsNeedsSelection(matches.size)
+    }
+
+    private fun renderJenkinsDisconnected(message: String) {
+        currentJobMapping = null
+        currentLiveData = null
+        currentJenkinsProblem = null
+        clearJenkinsModels()
+        val snapshot = jenkinsStateService.snapshot()
+        jenkinsStatusLabel.text = message
+        jenkinsJobLabel.text = "Mapped job: none"
+        jenkinsRefreshLabel.text = "Last refresh: never"
+        jenkinsErrorLabel.text = ""
+        jenkinsConnectionCard.update(
+            "Disconnected",
+            snapshot.baseUrl.ifBlank { "Configure Jenkins" },
+            Tone.NEUTRAL
+        )
+        jenkinsJobCard.update("Unmapped", "No Jenkins job is selected for this project.", Tone.NEUTRAL)
+        jenkinsBuildCard.update("No data", "Connect Jenkins to load recent runs and stages.", Tone.NEUTRAL)
+        updateButtons()
+    }
+
+    private fun renderJenkinsNeedsSelection(matchCount: Int) {
+        currentJobMapping = null
+        currentLiveData = null
+        clearJenkinsModels()
+        jenkinsStatusLabel.text = "Multiple Jenkins jobs matched this project."
+        jenkinsJobLabel.text = "Mapped job: choose one of $matchCount candidates"
+        jenkinsRefreshLabel.text = "Last refresh: waiting for job selection"
+        jenkinsErrorLabel.text = "Use Remap Job to select the Jenkins job that should power live data."
+        jenkinsConnectionCard.update("Connected", "Jenkins connection is ready.", Tone.SUCCESS)
+        jenkinsJobCard.update("Selection required", "$matchCount candidate jobs found.", Tone.WARNING)
+        jenkinsBuildCard.update("No data", "Live data will load once a job is selected.", Tone.NEUTRAL)
+        updateButtons()
+    }
+
+    private fun renderJenkinsNoMatch(searchedLabels: List<String>) {
+        currentJobMapping = null
+        currentLiveData = null
+        clearJenkinsModels()
+        jenkinsStatusLabel.text = "No Jenkins job matched the current project."
+        jenkinsJobLabel.text = "Searched for: ${searchedLabels.joinToString(", ").ifBlank { "current project labels" }}"
+        jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(System.currentTimeMillis())}"
+        jenkinsErrorLabel.text = "Use Remap Job after creating the Jenkins job or adjust the job naming."
+        jenkinsConnectionCard.update("Connected", "Jenkins connection is ready.", Tone.SUCCESS)
+        jenkinsJobCard.update("No match", searchedLabels.joinToString(", ").ifBlank { "No matching job" }, Tone.WARNING)
+        jenkinsBuildCard.update("No data", "No Jenkins job is mapped for this project.", Tone.NEUTRAL)
+        updateButtons()
+    }
+
+    private fun renderJenkinsProblem(snapshot: MerebJenkinsConnectionSnapshot, problem: MerebJenkinsApiProblem) {
+        currentLiveData = null
+        clearJenkinsModels()
+        jenkinsStatusLabel.text = when (problem.kind) {
+            MerebJenkinsApiProblemKind.AUTH -> "Jenkins authentication failed."
+            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> "Jenkins is unreachable."
+            MerebJenkinsApiProblemKind.NOT_FOUND -> "The mapped Jenkins job no longer exists."
+            MerebJenkinsApiProblemKind.INVALID_RESPONSE -> "Jenkins returned a response the plugin could not interpret."
+            MerebJenkinsApiProblemKind.UNKNOWN -> "Jenkins returned an unexpected response."
+        }
+        jenkinsJobLabel.text = currentJobMapping?.let { "Mapped job: ${it.jobDisplayName} (${it.jobPath})" } ?: "Mapped job: none"
+        jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(System.currentTimeMillis())}"
+        jenkinsErrorLabel.text = problem.message.orEmpty()
+        jenkinsConnectionCard.update(
+            snapshot.status.name.lowercase().replace('_', ' ').replaceFirstChar(Char::titlecase),
+            snapshot.baseUrl,
+            toneForConnectionStatus(snapshot.status)
+        )
+        jenkinsJobCard.update(currentJobMapping?.jobDisplayName ?: "Unmapped", currentJobMapping?.jobPath ?: "No Jenkins job mapping.", Tone.WARNING)
+        jenkinsBuildCard.update("Unavailable", problem.message ?: "Unable to load Jenkins build data.", Tone.ERROR)
+        updateButtons()
+    }
+
+    private fun renderJenkinsLive(
+        snapshot: MerebJenkinsConnectionSnapshot,
+        mapping: MerebJenkinsJobMapping,
+        liveData: MerebJenkinsLiveJobData,
+        autoSelected: Boolean,
+    ) {
+        refill(jenkinsRunsModel, liveData.runs)
+        refill(jenkinsStagesModel, liveData.selectedRun?.stages.orEmpty())
+        refill(jenkinsPendingModel, liveData.pendingInputs)
+        refill(jenkinsArtifactsModel, liveData.artifacts)
+        jenkinsStatusLabel.text = if (autoSelected) {
+            "Connected to Jenkins. The plugin auto-selected the matching job for this project."
+        } else {
+            "Connected to Jenkins. Live data is up to date for the selected project."
+        }
+        jenkinsJobLabel.text = "Mapped job: ${mapping.jobDisplayName} (${mapping.jobPath})"
+        jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(liveData.refreshedAt)}"
+        jenkinsErrorLabel.text = if (liveData.pipelineAvailable) {
+            if (liveData.pendingInputs.isNotEmpty()) "${liveData.pendingInputs.size} pending input action${if (liveData.pendingInputs.size == 1) "" else "s"} detected." else ""
+        } else {
+            "Pipeline stage details are unavailable for this Jenkins job."
+        }
+        jenkinsConnectionCard.update(
+            "Connected",
+            "${snapshot.username} @ ${snapshot.baseUrl}",
+            Tone.SUCCESS
+        )
+        jenkinsJobCard.update(mapping.jobDisplayName, mapping.jobPath, Tone.INFO)
+        val buildLabel = liveData.selectedRun?.let { "${it.name} ${it.status}" }
+            ?: liveData.summary.lastBuildNumber?.let { "#$it recent build" }
+            ?: "No builds"
+        val buildDetail = liveData.selectedRun?.url
+            ?: liveData.summary.lastBuildUrl
+            ?: "No Jenkins run URL available."
+        jenkinsBuildCard.update(buildLabel, buildDetail, toneForBuildStatus(liveData.selectedRun?.status))
+        updateButtons()
+    }
+
+    private fun clearJenkinsModels() {
+        jenkinsRunsModel.clear()
+        jenkinsStagesModel.clear()
+        jenkinsPendingModel.clear()
+        jenkinsArtifactsModel.clear()
+    }
+
+    private fun openInJenkins() {
+        val liveData = currentLiveData
+        val mapping = currentJobMapping
+        val url = liveData?.selectedRun?.url
+            ?: liveData?.summary?.url
+            ?: mapping?.let { buildJenkinsJobUrl(jenkinsStateService.snapshot().baseUrl, it.jobPath) }
+            ?: return
+        BrowserUtil.browse(url)
+    }
+
+    private fun scheduleJenkinsRefresh(
+        delayMs: Int = 300,
+        rescanWorkspace: Boolean = false,
+        forceRemap: Boolean = false,
+        manual: Boolean = false,
+    ) {
+        if (disposed || project.isDisposed) return
+        if (rescanWorkspace) {
+            workspaceRescanRequested = true
+        }
+        if (!manual && !canPollJenkins()) return
+        jenkinsPollAlarm.cancelAllRequests()
+        jenkinsPollAlarm.addRequest({ refreshJenkins(forceRemap = forceRemap, manual = manual) }, delayMs)
+    }
+
+    private fun scheduleNextJenkinsPoll() {
+        if (!canPollJenkins()) return
+        scheduleJenkinsRefresh(delayMs = 20_000)
+    }
+
+    private fun canPollJenkins(): Boolean = !disposed && !project.isDisposed && toolWindow.isVisible && root.isShowing
+
+    private fun recordConnectionProblem(problem: MerebJenkinsApiProblem) {
+        val status = when (problem.kind) {
+            MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
+            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.UNREACHABLE
+            else -> MerebJenkinsConnectionStatus.ERROR
+        }
+        jenkinsStateService.recordConnectionStatus(status, problem.message)
     }
 
     private fun applySafeFixes() {
@@ -461,7 +877,7 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun updateCards(analysis: MerebJenkinsAnalysisResult?) {
         if (analysis == null) {
-            listOf(recipeCard, imageCard, releaseCard, relationCard, noticeCard, fixCard).forEach {
+            listOf(recipeCard, imageCard, releaseCard, relationCard, noticeCard, fixCard, jenkinsConnectionCard, jenkinsJobCard, jenkinsBuildCard).forEach {
                 it.update("No config", "Open a supported config file to populate this panel.", Tone.NEUTRAL)
             }
             return
@@ -509,12 +925,17 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun updateButtons() {
         val analysis = currentAnalysis
+        val snapshot = jenkinsStateService.snapshot()
         safeFixesButton.isEnabled = analysis?.summary?.safeFixes?.isNotEmpty() == true
         recipeButton.isEnabled = analysis?.summary?.safeFixes?.any {
             it.kind == MerebJenkinsFixKind.ADD_RECIPE || it.kind == MerebJenkinsFixKind.REPLACE_RECIPE
         } == true
         openJenkinsfileButton.isEnabled = analysis?.projectScan?.jenkinsfilePath != null
         migrateButton.isEnabled = currentVirtualFile != null
+        connectJenkinsButton.text = if (snapshot.isConfigured) "Reconnect Jenkins" else "Connect Jenkins"
+        remapJobButton.isEnabled = snapshot.isConfigured && currentTarget != null
+        refreshJenkinsButton.isEnabled = snapshot.isConfigured && currentTarget != null
+        openInJenkinsButton.isEnabled = currentLiveData != null || currentJobMapping != null
     }
 
     private fun buildSubtitle(target: MerebJenkinsWorkspaceTarget, analysis: MerebJenkinsAnalysisResult): String {
@@ -654,11 +1075,19 @@ private class MerebJenkinsToolWindowPanel(
         return disposed || project.isDisposed || refreshId != upstreamRefreshVersion.get()
     }
 
+    private fun isDisposedOrStaleJenkins(refreshId: Int): Boolean {
+        return disposed || project.isDisposed || refreshId != jenkinsRefreshVersion.get()
+    }
+
     override fun dispose() {
         disposed = true
         upstreamRefreshVersion.incrementAndGet()
+        jenkinsRefreshVersion.incrementAndGet()
         upstreamRefreshTask?.cancel(true)
         upstreamRefreshTask = null
+        jenkinsRefreshTask?.cancel(true)
+        jenkinsRefreshTask = null
+        jenkinsPollAlarm.cancelAllRequests()
     }
 
     private class StatusCard(title: String) : JPanel(BorderLayout(0, 6)) {
@@ -705,6 +1134,37 @@ private fun toneColor(tone: Tone): java.awt.Color = when (tone) {
     Tone.ERROR -> JBColor(ColorPalette.ERROR_LIGHT, ColorPalette.ERROR_DARK)
     Tone.INFO -> JBColor(ColorPalette.INFO_LIGHT, ColorPalette.INFO_DARK)
     Tone.NEUTRAL -> JBColor.foreground()
+}
+
+private fun toneForConnectionStatus(status: MerebJenkinsConnectionStatus): Tone = when (status) {
+    MerebJenkinsConnectionStatus.CONNECTED -> Tone.SUCCESS
+    MerebJenkinsConnectionStatus.AUTH_FAILED -> Tone.ERROR
+    MerebJenkinsConnectionStatus.UNREACHABLE -> Tone.WARNING
+    MerebJenkinsConnectionStatus.ERROR -> Tone.ERROR
+    MerebJenkinsConnectionStatus.DISCONNECTED -> Tone.NEUTRAL
+}
+
+private fun toneForBuildStatus(status: String?): Tone = when {
+    status.isNullOrBlank() -> Tone.NEUTRAL
+    status.contains("SUCCESS", ignoreCase = true) -> Tone.SUCCESS
+    status.contains("FAIL", ignoreCase = true) || status.contains("ERROR", ignoreCase = true) || status.contains("ABORT", ignoreCase = true) -> Tone.ERROR
+    status.contains("IN_PROGRESS", ignoreCase = true) || status.contains("RUNNING", ignoreCase = true) || status.contains("PAUSED", ignoreCase = true) || status.contains("QUEUED", ignoreCase = true) -> Tone.INFO
+    else -> Tone.WARNING
+}
+
+private fun attrsForBuildStatus(status: String?): SimpleTextAttributes {
+    val tone = toneForBuildStatus(status)
+    val style = if (tone == Tone.ERROR) SimpleTextAttributes.STYLE_BOLD else SimpleTextAttributes.STYLE_PLAIN
+    return SimpleTextAttributes(style, toneColor(tone))
+}
+
+private fun formatTimestamp(epochMillis: Long?): String {
+    return epochMillis?.let { java.time.Instant.ofEpochMilli(it).toString() } ?: "never"
+}
+
+private fun buildJenkinsJobUrl(baseUrl: String, jobPath: String): String {
+    val normalizedBaseUrl = MerebJenkinsJenkinsStateService.normalizeBaseUrl(baseUrl)
+    return normalizedBaseUrl + MerebJenkinsJenkinsClient.encodeJobPath(jobPath) + "/"
 }
 
 private fun doubleClickListener(action: () -> Unit): MouseAdapter = object : MouseAdapter() {

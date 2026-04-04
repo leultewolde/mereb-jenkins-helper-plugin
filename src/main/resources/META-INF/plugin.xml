@@ -5,7 +5,8 @@
     <description><![CDATA[
     Interactive editor support for Mereb Jenkins configuration files. Adds <code>.mjc</code>
     file handling, schema validation, field-level inspections, one-click fixes, recipe-aware
-    config generation, migration help, a pipeline preview tool window, and upstream schema checks.
+    config generation, migration help, a pipeline preview tool window, Jenkins sign-in with
+    live read-only project data, and upstream schema checks.
   ]]></description>
 
     <depends>com.intellij.modules.platform</depends>
@@ -15,6 +16,11 @@
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup id="Mereb Jenkins" displayType="BALLOON" isLogByDefault="true"/>
         <postStartupActivity implementation="org.mereb.intellij.mjc.MerebJenkinsOnboardingActivity"/>
+        <applicationConfigurable
+                parentId="tools"
+                instance="org.mereb.intellij.mjc.MerebJenkinsSettingsConfigurable"
+                id="org.mereb.jenkins.helper.settings"
+                displayName="Mereb Jenkins Helper"/>
         <fileType
                 name="Mereb Jenkins Configuration"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsConfigurationFileType"

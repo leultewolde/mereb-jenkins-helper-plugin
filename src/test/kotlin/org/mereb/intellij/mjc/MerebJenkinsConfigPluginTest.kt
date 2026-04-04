@@ -43,6 +43,7 @@ class MerebJenkinsConfigPluginTest {
 
         assertTrue(html.contains("Mereb Jenkins Helper"))
         assertTrue(html.contains(".ci/ci.mjc"))
+        assertFalse(html.contains("<style", ignoreCase = true))
     }
 
     @Test

@@ -69,7 +69,7 @@ object MerebJenkinsHowToSupport {
     }
 
     fun loadHowToHtml(): String {
-        return MerebJenkinsHowToSupport::class.java.getResourceAsStream(HOW_TO_RESOURCE)
+        val rawHtml = MerebJenkinsHowToSupport::class.java.getResourceAsStream(HOW_TO_RESOURCE)
             ?.bufferedReader()
             ?.use { it.readText() }
             ?: """
@@ -80,6 +80,7 @@ object MerebJenkinsHowToSupport {
               </body>
             </html>
             """.trimIndent()
+        return sanitizeHtmlForSwing(rawHtml)
     }
 
     fun showHowToDialog(project: Project) {
@@ -88,6 +89,13 @@ object MerebJenkinsHowToSupport {
 
     fun openToolWindow(project: Project) {
         ToolWindowManager.getInstance(project).getToolWindow(TOOL_WINDOW_ID)?.activate(null)
+    }
+
+    private fun sanitizeHtmlForSwing(html: String): String {
+        return html
+            .replace(Regex("(?is)<style\\b[^>]*>.*?</style>"), "")
+            .replace(Regex("(?is)<meta\\b[^>]*>"), "")
+            .replace(Regex("(?is)\\sstyle\\s*=\\s*([\"']).*?\\1"), "")
     }
 }
 

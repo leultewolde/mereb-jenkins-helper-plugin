@@ -18,10 +18,13 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 - Suppresses unrelated inspection-based lint on supported Mereb config files, including tools like SonarLint, so Mereb-aware checks remain the primary source of feedback.
 - Adds a `Mereb Jenkins` tool window with:
   - `Overview`: recipe, capabilities, notices, safe fixes, and section state
+  - `Jenkins`: connection state, mapped job, recent runs, stages, pending input, and artifact links
   - `Flow`: derived pipeline stage sequence
   - `Relations`: order-to-environment links, unused definitions, inactive sections, and runtime-ignored links
   - `Upstream`: manual schema freshness check against GitHub
 - Adds a dedicated tool window icon and a richer native IntelliJ UI instead of a plain HTML summary.
+- Adds Jenkins sign-in and secure API-token storage through IntelliJ Password Safe.
+- Discovers likely Jenkins jobs for the focused Mereb project, remembers the selected mapping per project root, and shows read-only live Jenkins data in the tool window.
 - Warns when a user edits a legacy YAML filename instead of the preferred `.ci/ci.mjc`.
 - Pulls the schema from the GitHub source of truth at `https://github.com/leultewolde/mereb-jenkins/blob/main/docs/ci.schema.json` during build, with a checked-in snapshot as a fallback when the remote is unavailable.
 
@@ -31,6 +34,9 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 - Prefer `.ci/ci.mjc`; legacy `.ci/ci.yml` and `ci.yml` still work.
 - Open the `Mereb Jenkins` tool window to inspect the detected project context, derived flow, relations, warnings, and safe fixes.
 - If a workspace contains multiple Mereb projects, use the tool window `Project` selector to choose which one to focus on.
+- Use `Connect Jenkins` in the tool window or the plugin settings page to save `https://jenkins.leultewolde.com`, your Jenkins username, and an API token in IntelliJ Password Safe.
+- The plugin auto-searches Jenkins for likely jobs for the focused project. If multiple jobs match, it asks you to choose once and remembers the mapping locally.
+- When the tool window is visible and a project is mapped, the plugin polls Jenkins for read-only live data every 20 seconds.
 - Use normal IntelliJ quick fixes, hover docs, and guided completion inside supported config files to apply repairs and inspect runtime notes without leaving the editor.
 - Third-party inspection-based lint is intentionally suppressed for supported Mereb config files. YAML parse errors, bundled schema validation, and Mereb-specific checks still remain.
 - Use `Tools -> New Mereb Jenkins Config` to scaffold a new recipe-aware config in the current project.
