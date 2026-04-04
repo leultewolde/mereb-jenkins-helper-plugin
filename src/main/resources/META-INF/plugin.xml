@@ -13,6 +13,10 @@
     <depends>com.intellij.modules.json</depends>
     <depends>org.jetbrains.plugins.yaml</depends>
 
+    <extensions defaultExtensionNs="JavaScript.JsonSchema">
+        <ProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
+    </extensions>
+
     <extensions defaultExtensionNs="com.intellij">
         <notificationGroup id="Mereb Jenkins" displayType="BALLOON" isLogByDefault="true"/>
         <postStartupActivity implementation="org.mereb.intellij.mjc.MerebJenkinsOnboardingActivity"/>
@@ -27,7 +31,6 @@
                 fieldName="INSTANCE"
                 language="yaml"
                 extensions="mjc"/>
-        <jsonSchemaProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
         <lang.inspectionSuppressor
                 language="yaml"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsInspectionSuppressor"/>
