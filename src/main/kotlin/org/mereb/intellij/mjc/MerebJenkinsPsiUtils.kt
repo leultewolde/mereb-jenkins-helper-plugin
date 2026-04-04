@@ -3,6 +3,7 @@ package org.mereb.intellij.mjc
 import com.intellij.openapi.util.TextRange
 import com.intellij.psi.PsiElement
 import com.intellij.psi.PsiFile
+import com.intellij.psi.util.PsiTreeUtil
 import org.jetbrains.yaml.psi.YAMLFile
 import org.jetbrains.yaml.psi.YAMLKeyValue
 import org.jetbrains.yaml.psi.YAMLMapping
@@ -40,6 +41,12 @@ object MerebJenkinsPsiUtils {
     }
 
     fun elementPathString(element: PsiElement?): String? = pathForElement(element)?.toString()
+
+    fun enclosingMappingPathString(element: PsiElement?): String? {
+        val mapping = PsiTreeUtil.getParentOfType(element, YAMLMapping::class.java, false) ?: return null
+        val owner = mapping.parent as? YAMLKeyValue ?: return null
+        return pathForElement(owner)?.toString()
+    }
 
     fun rangeForElement(element: PsiElement): TextRange = when (element) {
         is YAMLKeyValue -> element.key?.textRange ?: element.textRange

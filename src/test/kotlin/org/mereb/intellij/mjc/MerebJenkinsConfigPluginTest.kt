@@ -5,6 +5,7 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 import org.junit.jupiter.api.Test
+import org.jetbrains.yaml.YAMLTokenTypes
 
 class MerebJenkinsConfigPluginTest {
 
@@ -187,5 +188,34 @@ class MerebJenkinsConfigPluginTest {
 
         assertTrue(suggestions.any { it.lookup == "service" && it.typeText == "recipe" })
         assertTrue(suggestions.any { it.lookup == "terraform" && it.typeText == "recipe" })
+    }
+
+    @Test
+    fun `completion model suggests nested keys for image block`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    image:
+                      rep
+                """.trimIndent(),
+                parentPathString = "image",
+                linePrefix = "  rep",
+                keyContext = true,
+                valueContext = false,
+            )
+        )
+
+        assertTrue(suggestions.any { it.lookup == "repository" && it.insertText == "repository: " })
+        assertTrue(suggestions.any { it.lookup == "dockerfile" })
+    }
+
+    @Test
+    fun `syntax highlighter remaps yaml keys and values to mereb categories`() {
+        val highlighter = MerebJenkinsSyntaxHighlighter()
+
+        assertTrue(highlighter.getTokenHighlights(YAMLTokenTypes.SCALAR_KEY).contains(MerebJenkinsHighlighting.KEY))
+        assertTrue(highlighter.getTokenHighlights(YAMLTokenTypes.SCALAR_TEXT).contains(MerebJenkinsHighlighting.VALUE))
+        assertTrue(highlighter.getTokenHighlights(YAMLTokenTypes.COMMENT).contains(MerebJenkinsHighlighting.COMMENT))
     }
 }

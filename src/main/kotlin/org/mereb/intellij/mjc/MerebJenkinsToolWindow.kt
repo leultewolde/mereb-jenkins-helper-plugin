@@ -3,6 +3,9 @@ package org.mereb.intellij.mjc
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.editor.event.DocumentEvent
+import com.intellij.openapi.editor.event.DocumentListener
+import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
@@ -12,6 +15,7 @@ import com.intellij.openapi.util.Condition
 import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.IconLoader
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.ColoredListCellRenderer
@@ -22,6 +26,7 @@ import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.content.ContentFactory
+import com.intellij.util.Alarm
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
@@ -38,6 +43,9 @@ import javax.swing.DefaultListModel
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JPanel
+import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.vfs.newvfs.BulkFileListener
+import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import kotlin.io.path.exists
 
 class MerebJenkinsToolWindowFactory : ToolWindowFactory, DumbAware {
@@ -59,6 +67,7 @@ private class MerebJenkinsToolWindowPanel(
     private val analyzer = MerebJenkinsConfigAnalyzer()
     private val upstreamChecker = MerebJenkinsUpstreamChecker()
     private val upstreamRefreshVersion = AtomicInteger()
+    private val refreshAlarm = Alarm(Alarm.ThreadToUse.SWING_THREAD, this)
 
     @Volatile private var disposed = false
     @Volatile private var upstreamRefreshTask: Future<*>? = null
@@ -119,9 +128,26 @@ private class MerebJenkinsToolWindowPanel(
 
         project.messageBus.connect(this).subscribe(FileEditorManagerListener.FILE_EDITOR_MANAGER, object : FileEditorManagerListener {
             override fun selectionChanged(event: FileEditorManagerEvent) {
-                refreshCurrentFile()
+                scheduleRefresh()
             }
         })
+        project.messageBus.connect(this).subscribe(VirtualFileManager.VFS_CHANGES, object : BulkFileListener {
+            override fun after(events: List<VFileEvent>) {
+                val trackedPath = currentVirtualFile?.path
+                if (trackedPath != null && events.any { it.path == trackedPath }) {
+                    scheduleRefresh()
+                }
+            }
+        })
+        EditorFactory.getInstance().eventMulticaster.addDocumentListener(object : DocumentListener {
+            override fun documentChanged(event: DocumentEvent) {
+                val file = FileDocumentManager.getInstance().getFile(event.document) ?: return
+                if (!MerebJenkinsConfigPaths.isSchemaTarget(file)) return
+                if (file == currentVirtualFile || file == selectedConfigFile()) {
+                    scheduleRefresh()
+                }
+            }
+        }, this)
 
         refreshCurrentFile()
         renderUpstreamIdle()
@@ -298,8 +324,7 @@ private class MerebJenkinsToolWindowPanel(
 
     private fun refreshCurrentFile() {
         if (disposed || project.isDisposed) return
-        val virtualFile = FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
-        currentVirtualFile = virtualFile?.takeIf { MerebJenkinsConfigPaths.isSchemaTarget(it) }
+        currentVirtualFile = selectedConfigFile()
         val selectedConfig = currentVirtualFile
         if (selectedConfig == null) {
             titleLabel.text = "Mereb Jenkins"
@@ -473,6 +498,16 @@ private class MerebJenkinsToolWindowPanel(
         upstreamStateLabel.text = "Schema status: idle"
         upstreamHashesLabel.text = "Run a manual check to compare bundled and live schema hashes."
         upstreamErrorLabel.text = ""
+    }
+
+    private fun scheduleRefresh(delayMs: Int = 300) {
+        if (disposed || project.isDisposed) return
+        refreshAlarm.cancelAllRequests()
+        refreshAlarm.addRequest({ refreshCurrentFile() }, delayMs)
+    }
+
+    private fun selectedConfigFile(): VirtualFile? {
+        return FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.takeIf { MerebJenkinsConfigPaths.isSchemaTarget(it) }
     }
 
     private fun clearModels() {

@@ -22,10 +22,27 @@ class MerebJenkinsCompletionContributor : CompletionContributor() {
                 ) {
                     val file = parameters.originalFile.virtualFile ?: return
                     if (!MerebJenkinsConfigPaths.isSchemaTarget(file)) return
+                    val document = parameters.editor.document
                     val path = MerebJenkinsPsiUtils.elementPathString(parameters.position)
                         ?: MerebJenkinsPsiUtils.elementPathString(parameters.position.parent)
-                    val linePrefix = currentLinePrefix(parameters.editor.document, parameters.offset)
-                    MerebJenkinsCompletionModel.suggestions(parameters.originalFile.text, path, linePrefix).forEach { item ->
+                    val parentPath = MerebJenkinsPsiUtils.enclosingMappingPathString(parameters.position)
+                        ?: MerebJenkinsPsiUtils.enclosingMappingPathString(parameters.position.parent)
+                        ?: inferredParentPath(document, parameters.offset)
+                    val linePrefix = currentLinePrefix(document, parameters.offset)
+                    val trimmedLine = linePrefix.trimStart()
+                    val valueContext = trimmedLine.startsWith("-") || trimmedLine.contains(":")
+                    val keyContext = !valueContext
+
+                    MerebJenkinsCompletionModel.suggestions(
+                        MerebJenkinsCompletionRequest(
+                            rawText = parameters.originalFile.text,
+                            pathString = path,
+                            parentPathString = parentPath,
+                            linePrefix = linePrefix,
+                            keyContext = keyContext,
+                            valueContext = valueContext,
+                        )
+                    ).forEach { item ->
                         result.addElement(
                             LookupElementBuilder.create(item.lookup)
                                 .withTypeText(item.typeText, true)
@@ -50,4 +67,38 @@ class MerebJenkinsCompletionContributor : CompletionContributor() {
         val start = document.getLineStartOffset(line)
         return document.getText(com.intellij.openapi.util.TextRange(start, offset))
     }
+
+    private fun inferredParentPath(document: Document, offset: Int): String? {
+        val lineNumber = document.getLineNumber(offset)
+        val currentIndent = leadingIndent(currentLinePrefix(document, offset))
+        val stack = mutableListOf<Pair<Int, String>>()
+
+        for (line in 0 until lineNumber) {
+            val start = document.getLineStartOffset(line)
+            val end = document.getLineEndOffset(line)
+            val raw = document.getText(com.intellij.openapi.util.TextRange(start, end))
+            val trimmed = raw.trimEnd()
+            if (trimmed.isBlank()) continue
+
+            val indent = leadingIndent(trimmed)
+            val content = trimmed.trimStart()
+            while (stack.isNotEmpty() && indent <= stack.last().first) {
+                stack.removeAt(stack.lastIndex)
+            }
+            if (content.endsWith(":") && !content.startsWith("-")) {
+                val key = content.removeSuffix(":").trim()
+                if (key.isNotBlank()) {
+                    stack += indent to key
+                }
+            }
+        }
+
+        while (stack.isNotEmpty() && currentIndent <= stack.last().first) {
+            stack.removeAt(stack.lastIndex)
+        }
+
+        return stack.takeIf { it.isNotEmpty() }?.joinToString(".") { it.second }
+    }
+
+    private fun leadingIndent(text: String): Int = text.takeWhile { it == ' ' || it == '\t' }.length
 }

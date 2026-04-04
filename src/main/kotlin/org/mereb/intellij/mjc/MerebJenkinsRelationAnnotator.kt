@@ -10,14 +10,13 @@ import com.intellij.openapi.editor.colors.TextAttributesKey
 import com.intellij.psi.PsiElement
 
 class MerebJenkinsRelationAnnotator : Annotator {
-    private val analyzer = MerebJenkinsConfigAnalyzer()
-
     override fun annotate(element: PsiElement, holder: AnnotationHolder) {
-        val virtualFile = element.containingFile?.virtualFile ?: return
+        val containingFile = element.containingFile ?: return
+        val virtualFile = containingFile.virtualFile ?: return
         if (!MerebJenkinsConfigPaths.isSchemaTarget(virtualFile)) return
 
         val path = MerebJenkinsPsiUtils.elementPathString(element) ?: return
-        val analysis = analyzer.analyzeDetailed(element.containingFile.text, virtualFile.path)
+        val analysis = MerebJenkinsAnalysisCache.forFile(containingFile)
         val range = MerebJenkinsPsiUtils.rangeForElement(element)
 
         analysis.summary.relations

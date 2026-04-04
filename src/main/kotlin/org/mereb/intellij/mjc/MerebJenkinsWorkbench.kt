@@ -1,5 +1,6 @@
 package org.mereb.intellij.mjc
 
+import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.command.WriteCommandAction
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.OpenFileDescriptor
@@ -15,9 +16,9 @@ import org.jetbrains.yaml.psi.YAMLFile
 
 object MerebJenkinsWorkbench {
     fun runMigrationAssistant(project: Project, virtualFile: VirtualFile) {
-        val psiFile = PsiManager.getInstance(project).findFile(virtualFile) ?: return
-        val analysis = MerebJenkinsConfigAnalyzer().analyzeDetailed(psiFile.text, virtualFile.path)
-        val plan = MerebJenkinsMigrationPlanner.plan(psiFile, analysis)
+        val psiFile = findPsiFile(project, virtualFile) ?: return
+        val analysis = readAction { MerebJenkinsConfigAnalyzer().analyzeDetailed(psiFile.text, virtualFile.path) }
+        val plan = readAction { MerebJenkinsMigrationPlanner.plan(psiFile, analysis) }
         if (plan.isEmpty()) {
             Messages.showInfoMessage(project, "No conservative migration changes are needed for this project.", "Mereb Jenkins")
             return
@@ -68,9 +69,11 @@ object MerebJenkinsWorkbench {
 
     fun navigateToPath(project: Project, virtualFile: VirtualFile, path: MerebJenkinsPath?): Boolean {
         if (path == null) return false
-        val psiFile = PsiManager.getInstance(project).findFile(virtualFile) as? YAMLFile ?: return false
-        val target = MerebJenkinsPsiUtils.findBestElement(psiFile, path) ?: return false
-        OpenFileDescriptor(project, virtualFile, target.textRange.startOffset).navigate(true)
+        val targetOffset = readAction {
+            val psiFile = PsiManager.getInstance(project).findFile(virtualFile) as? YAMLFile ?: return@readAction null
+            MerebJenkinsPsiUtils.findBestElement(psiFile, path)?.textRange?.startOffset
+        } ?: return false
+        OpenFileDescriptor(project, virtualFile, targetOffset).navigate(true)
         return true
     }
 
@@ -104,7 +107,7 @@ object MerebJenkinsWorkbench {
         analysis: MerebJenkinsAnalysisResult,
         suggestion: MerebJenkinsFixSuggestion,
     ): VirtualFile? {
-        val psiFile = PsiManager.getInstance(project).findFile(virtualFile)
+        val psiFile = findPsiFile(project, virtualFile)
         when (suggestion.kind) {
             MerebJenkinsFixKind.ADD_RECIPE -> {
                 val recipe = suggestion.data["recipe"].orEmpty()
@@ -134,29 +137,26 @@ object MerebJenkinsWorkbench {
             }
             MerebJenkinsFixKind.REMOVE_KEY -> {
                 val path = suggestion.data["path"].orEmpty()
-                val psiYaml = psiFile as? YAMLFile
-                val keyValue = psiYaml?.let { MerebJenkinsPsiUtils.findKeyValue(it, MerebJenkinsPsiUtils.parsePathString(path)) }
-                if (keyValue != null) {
-                    WriteCommandAction.runWriteCommandAction(project) {
-                        keyValue.delete()
-                    }
+                WriteCommandAction.runWriteCommandAction(project) {
+                    val psiYaml = PsiManager.getInstance(project).findFile(virtualFile) as? YAMLFile ?: return@runWriteCommandAction
+                    val keyValue = MerebJenkinsPsiUtils.findKeyValue(psiYaml, MerebJenkinsPsiUtils.parsePathString(path))
+                    keyValue?.delete()
                 }
             }
             MerebJenkinsFixKind.FIX_ORDER -> {
                 val path = suggestion.data["path"].orEmpty()
                 val validNames = suggestion.data["validNames"]?.split(',')?.filter(String::isNotBlank).orEmpty()
-                val psiYaml = psiFile as? YAMLFile
-                val keyValue = psiYaml?.let { MerebJenkinsPsiUtils.findKeyValue(it, MerebJenkinsPsiUtils.parsePathString(path)) }
-                mutateYamlDocument(project, psiFile) { document, _ ->
+                mutateYamlDocument(project, psiFile) { document, currentPsiFile ->
+                    val currentYaml = currentPsiFile as? YAMLFile ?: return@mutateYamlDocument
+                    val keyValue = MerebJenkinsPsiUtils.findKeyValue(currentYaml, MerebJenkinsPsiUtils.parsePathString(path))
                     val value = keyValue?.value ?: return@mutateYamlDocument
                     document.replaceString(value.textRange.startOffset, value.textRange.endOffset, "[${validNames.joinToString(", ")}]")
                 }
             }
             MerebJenkinsFixKind.ADD_IMAGE_REPOSITORY -> {
                 val placeholder = suggestion.data["repository"].orEmpty().ifBlank { "registry.example.com/app" }
-                val psiYaml = psiFile as? YAMLFile
                 mutateYamlDocument(project, psiFile) { document, currentPsiFile ->
-                    val currentYaml = currentPsiFile as? YAMLFile ?: psiYaml
+                    val currentYaml = currentPsiFile as? YAMLFile
                     val imageKey = currentYaml?.let { MerebJenkinsPsiUtils.findKeyValue(it, MerebJenkinsPsiUtils.parsePathString("image")) }
                     when (val value = imageKey?.value) {
                         null -> {
@@ -187,7 +187,7 @@ object MerebJenkinsWorkbench {
         mutator: (com.intellij.openapi.editor.Document, PsiFile?) -> Unit,
     ) {
         val file = psiFile ?: return
-        val document = PsiDocumentManager.getInstance(project).getDocument(file) ?: return
+        val document = readAction { PsiDocumentManager.getInstance(project).getDocument(file) } ?: return
         WriteCommandAction.runWriteCommandAction(project) {
             mutator(document, file)
             PsiDocumentManager.getInstance(project).commitDocument(document)
@@ -219,8 +219,8 @@ object MerebJenkinsWorkbench {
         if (targetPath.isBlank()) return
         val jenkinsfilePath = scan.jenkinsfilePath ?: return
         val jenkinsVirtualFile = VfsUtil.findFile(Paths.get(jenkinsfilePath), true) ?: return
-        val psiFile = PsiManager.getInstance(project).findFile(jenkinsVirtualFile) ?: return
-        val document = PsiDocumentManager.getInstance(project).getDocument(psiFile) ?: return
+        val psiFile = findPsiFile(project, jenkinsVirtualFile) ?: return
+        val document = readAction { PsiDocumentManager.getInstance(project).getDocument(psiFile) } ?: return
         WriteCommandAction.runWriteCommandAction(project) {
             val updated = document.text
                 .replace("configPath: '.ci/ci.yml'", "configPath: '$targetPath'")
@@ -231,4 +231,9 @@ object MerebJenkinsWorkbench {
             PsiDocumentManager.getInstance(project).commitDocument(document)
         }
     }
+
+    private fun findPsiFile(project: Project, virtualFile: VirtualFile): PsiFile? =
+        readAction { PsiManager.getInstance(project).findFile(virtualFile) }
+
+    private fun <T> readAction(action: () -> T): T = ReadAction.compute<T, RuntimeException> { action() }
 }

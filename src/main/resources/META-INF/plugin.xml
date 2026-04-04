@@ -20,12 +20,20 @@
                 language="yaml"
                 extensions="mjc"/>
         <jsonSchemaProviderFactory implementation="org.mereb.intellij.mjc.MerebJenkinsSchemaProviderFactory"/>
+        <lang.syntaxHighlighterFactory
+                language="YAML"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsSyntaxHighlighterFactory"/>
+        <colorSettingsPage implementation="org.mereb.intellij.mjc.MerebJenkinsColorSettingsPage"/>
         <completion.contributor
                 language="YAML"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsCompletionContributor"/>
         <lang.documentationProvider
                 language="YAML"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsDocumentationProvider"/>
+        <codeInsight.inlayProvider
+                language="YAML"
+                id="MerebJenkinsBlockMetadata"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsBlockInlayHintsProvider"/>
         <toolWindow id="Mereb Jenkins"
                     anchor="right"
                     icon="/icons/mereb-toolwindow.svg"
@@ -34,6 +42,9 @@
         <annotator
                 language="YAML"
                 implementationClass="org.mereb.intellij.mjc.MerebJenkinsRelationAnnotator"/>
+        <annotator
+                language="YAML"
+                implementationClass="org.mereb.intellij.mjc.MerebJenkinsScalarAnnotator"/>
         <localInspection
                 language="YAML"
                 shortName="LegacyMerebJenkinsConfigFilename"

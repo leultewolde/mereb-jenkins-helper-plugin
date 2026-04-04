@@ -9,6 +9,15 @@ data class MerebJenkinsCompletionItem(
     val tailText: String? = null,
 )
 
+data class MerebJenkinsCompletionRequest(
+    val rawText: String,
+    val pathString: String? = null,
+    val parentPathString: String? = null,
+    val linePrefix: String,
+    val keyContext: Boolean = false,
+    val valueContext: Boolean = true,
+)
+
 object MerebJenkinsCompletionModel {
     private val recipeValues = listOf("build", "package", "image", "service", "microfrontend", "terraform")
     private val deliveryModes = listOf("staged", "custom")
@@ -21,62 +30,112 @@ object MerebJenkinsCompletionModel {
         pathString: String?,
         linePrefix: String,
     ): List<MerebJenkinsCompletionItem> {
-        val cfg = runCatching { (Yaml().load<Any?>(rawText) as? Map<*, *>)?.normalizeMap().orEmpty() }.getOrDefault(emptyMap())
+        return suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = rawText,
+                pathString = pathString,
+                linePrefix = linePrefix,
+                valueContext = true,
+            )
+        )
+    }
+
+    fun suggestions(request: MerebJenkinsCompletionRequest): List<MerebJenkinsCompletionItem> {
+        val cfg = runCatching { (Yaml().load<Any?>(request.rawText) as? Map<*, *>)?.normalizeMap().orEmpty() }.getOrDefault(emptyMap())
         val suggestions = mutableListOf<MerebJenkinsCompletionItem>()
-        val normalizedPath = pathString.orEmpty()
-        val trimmedLine = linePrefix.trimStart()
-
-        if (normalizedPath == "recipe" || trimmedLine.startsWith("recipe:")) {
-            suggestions += recipeValues.map { value ->
-                MerebJenkinsCompletionItem(value, value, "recipe")
-            }
-        }
-
-        if (normalizedPath == "delivery.mode" || trimmedLine.startsWith("mode:")) {
-            suggestions += deliveryModes.map { value ->
-                MerebJenkinsCompletionItem(value, value, "delivery mode")
-            }
-        }
-
-        if (normalizedPath == "release.autoTag.bump" || trimmedLine.startsWith("bump:")) {
-            suggestions += bumpValues.map { value ->
-                MerebJenkinsCompletionItem(value, value, "version bump")
-            }
-        }
-
-        if (normalizedPath == "preset" || trimmedLine.startsWith("preset:")) {
-            suggestions += presetValues.map { value ->
-                MerebJenkinsCompletionItem(value, value, "preset")
-            }
-        }
-
-        if (normalizedPath.startsWith("deploy.order[")) {
-            suggestions += (deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { value ->
-                MerebJenkinsCompletionItem(value, value, "deploy env")
-            }
-        }
-
-        if (normalizedPath.startsWith("microfrontend.order[")) {
-            suggestions += (microfrontendEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { value ->
-                MerebJenkinsCompletionItem(value, value, "microfrontend env")
-            }
-        }
-
-        if (normalizedPath.startsWith("terraform.order[")) {
-            suggestions += (terraformEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { value ->
-                MerebJenkinsCompletionItem(value, value, "terraform env")
-            }
-        }
-
+        val normalizedPath = request.pathString.orEmpty()
+        val parentPath = request.parentPathString.orEmpty()
+        val trimmedLine = request.linePrefix.trimStart()
         val recipe = cfg["recipe"]?.asString()?.takeIf(String::isNotBlank)
-        suggestions += contextAwareBlocks(recipe)
-        suggestions += MerebJenkinsTemplates.snippetTemplates().map { (label, snippet) ->
-            MerebJenkinsCompletionItem(label, snippet, "Mereb Jenkins snippet")
+
+        if (request.valueContext) {
+            suggestions += valueSuggestions(cfg, normalizedPath, trimmedLine)
         }
+
+        if (request.keyContext) {
+            suggestions += keySuggestions(cfg, parentPath)
+            suggestions += contextAwareBlocks(recipe, parentPath)
+            suggestions += MerebJenkinsTemplates.snippetTemplates().map { (label, snippet) ->
+                MerebJenkinsCompletionItem(label, snippet, "Mereb Jenkins snippet")
+            }
+        }
+
         return suggestions.distinctBy { listOf(it.lookup, it.insertText, it.typeText) }
     }
 
-    private fun contextAwareBlocks(recipe: String?): List<MerebJenkinsCompletionItem> {
+    private fun valueSuggestions(
+        cfg: Map<String, Any?>,
+        normalizedPath: String,
+        trimmedLine: String,
+    ): List<MerebJenkinsCompletionItem> = buildList {
+        if (normalizedPath == "recipe" || trimmedLine.startsWith("recipe:")) {
+            addAll(recipeValues.map { value -> MerebJenkinsCompletionItem(value, value, "recipe") })
+        }
+
+        if (normalizedPath == "delivery.mode" || trimmedLine.startsWith("mode:")) {
+            addAll(deliveryModes.map { value -> MerebJenkinsCompletionItem(value, value, "delivery mode") })
+        }
+
+        if (normalizedPath == "release.autoTag.bump" || trimmedLine.startsWith("bump:")) {
+            addAll(bumpValues.map { value -> MerebJenkinsCompletionItem(value, value, "version bump") })
+        }
+
+        if (normalizedPath == "preset" || trimmedLine.startsWith("preset:")) {
+            addAll(presetValues.map { value -> MerebJenkinsCompletionItem(value, value, "preset") })
+        }
+
+        if (normalizedPath.startsWith("deploy.order[")) {
+            addAll((deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { value ->
+                MerebJenkinsCompletionItem(value, value, "deploy env")
+            })
+        }
+
+        if (normalizedPath.startsWith("microfrontend.order[")) {
+            addAll((microfrontendEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { value ->
+                MerebJenkinsCompletionItem(value, value, "microfrontend env")
+            })
+        }
+
+        if (normalizedPath.startsWith("terraform.order[")) {
+            addAll((terraformEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { value ->
+                MerebJenkinsCompletionItem(value, value, "terraform env")
+            })
+        }
+    }
+
+    private fun keySuggestions(
+        cfg: Map<String, Any?>,
+        parentPath: String,
+    ): List<MerebJenkinsCompletionItem> = when (parentPath) {
+        "" -> listOf(
+            scalarKey("version"),
+            scalarKey("recipe"),
+            scalarKey("preset"),
+            blockKey("delivery"),
+            blockKey("build"),
+            blockKey("image"),
+            blockKey("release"),
+            blockKey("deploy"),
+            blockKey("microfrontend"),
+            blockKey("terraform"),
+        )
+        "delivery" -> listOf(scalarKey("mode"))
+        "image" -> listOf(scalarKey("repository"), scalarKey("context"), scalarKey("dockerfile"))
+        "release" -> listOf(blockKey("autoTag"))
+        "release.autoTag" -> listOf(scalarKey("enabled"), scalarKey("when"), scalarKey("bump"))
+        "deploy" -> listOf(sequenceKey("order")) + (deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        "microfrontend" -> listOf(scalarKey("name"), scalarKey("packageName"), sequenceKey("order"), blockKey("environments"))
+        "microfrontend.environments" -> (microfrontendEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        "terraform" -> listOf(scalarKey("path"), sequenceKey("order"), blockKey("environments"))
+        "terraform.environments" -> (terraformEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        else -> emptyList()
+    }
+
+    private fun contextAwareBlocks(
+        recipe: String?,
+        parentPath: String,
+    ): List<MerebJenkinsCompletionItem> {
+        if (parentPath.isNotBlank()) return emptyList()
         val base = mutableListOf<MerebJenkinsCompletionItem>()
         when (recipe) {
             "service" -> {
@@ -95,6 +154,18 @@ object MerebJenkinsCompletionModel {
         }
         return base
     }
+
+    private fun scalarKey(name: String): MerebJenkinsCompletionItem =
+        MerebJenkinsCompletionItem(name, "$name: ", "config key")
+
+    private fun blockKey(name: String): MerebJenkinsCompletionItem =
+        MerebJenkinsCompletionItem(name, "$name:\n  ", "config block")
+
+    private fun sequenceKey(name: String): MerebJenkinsCompletionItem =
+        MerebJenkinsCompletionItem(name, "$name:\n  - ", "config list")
+
+    private fun envKey(name: String): MerebJenkinsCompletionItem =
+        MerebJenkinsCompletionItem(name, "$name:\n  ", "environment block")
 
     private fun deployEnvironmentNames(cfg: Map<String, Any?>): List<String> {
         val deploy = (cfg["deploy"] as? Map<*, *>)?.normalizeMap().orEmpty()
