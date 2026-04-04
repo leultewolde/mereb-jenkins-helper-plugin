@@ -132,6 +132,44 @@ class MerebJenkinsJenkinsClient(
     private val authorizationHeader = "Basic " + Base64.getEncoder().encodeToString("$username:$token".toByteArray(StandardCharsets.UTF_8))
     private val yamlLoad = Yaml(SafeConstructor(LoaderOptions()))
 
+    fun validateConnection(): MerebJenkinsApiResult<MerebJenkinsConnectionValidation> {
+        return requestMap("${normalizedBaseUrl}/whoAmI/api/json?tree=authenticated,name,anonymous").flatMapSuccess { body ->
+            val user = MerebJenkinsAuthenticatedUser(
+                name = body.string("name"),
+                authenticated = body.boolean("authenticated") ?: false,
+                anonymous = body.boolean("anonymous") ?: false,
+            )
+            if (!user.authenticated || user.anonymous) {
+                return@flatMapSuccess MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.AUTH,
+                        message = "Jenkins did not authenticate the API token.",
+                        requestUrl = "${normalizedBaseUrl}/whoAmI/api/json?tree=authenticated,name,anonymous",
+                    )
+                )
+            }
+            if (!looksLikeSameUser(user.name, username)) {
+                return@flatMapSuccess MerebJenkinsApiResult.Failure(
+                    MerebJenkinsApiProblem(
+                        kind = MerebJenkinsApiProblemKind.AUTH,
+                        message = "Jenkins authenticated as ${user.name ?: "an unknown user"}, which does not match the configured username.",
+                        requestUrl = "${normalizedBaseUrl}/whoAmI/api/json?tree=authenticated,name,anonymous",
+                    )
+                )
+            }
+            val controller = when (val controllerResult = validateController()) {
+                is MerebJenkinsApiResult.Success -> controllerResult.value
+                is MerebJenkinsApiResult.Failure -> null
+            }
+            MerebJenkinsApiResult.Success(
+                MerebJenkinsConnectionValidation(
+                    user = user,
+                    controller = controller,
+                )
+            )
+        }
+    }
+
     fun validateController(): MerebJenkinsApiResult<MerebJenkinsControllerInfo> {
         return requestMap("${normalizedBaseUrl}/api/json").mapSuccess { body ->
             MerebJenkinsControllerInfo(
@@ -363,6 +401,7 @@ class MerebJenkinsJenkinsClient(
                         kind = MerebJenkinsApiProblemKind.AUTH,
                         statusCode = response.statusCode,
                         message = "Jenkins rejected the credentials.",
+                        requestUrl = url,
                     )
                 )
                 HttpURLConnection.HTTP_NOT_FOUND -> MerebJenkinsApiResult.Failure(
@@ -370,6 +409,7 @@ class MerebJenkinsJenkinsClient(
                         kind = MerebJenkinsApiProblemKind.NOT_FOUND,
                         statusCode = response.statusCode,
                         message = "The requested Jenkins resource was not found.",
+                        requestUrl = url,
                     )
                 )
                 else -> MerebJenkinsApiResult.Failure(
@@ -377,15 +417,16 @@ class MerebJenkinsJenkinsClient(
                         kind = MerebJenkinsApiProblemKind.UNKNOWN,
                         statusCode = response.statusCode,
                         message = "Jenkins returned HTTP ${response.statusCode}.",
+                        requestUrl = url,
                     )
                 )
             }
         } catch (error: Exception) {
             MerebJenkinsApiResult.Failure(
                 when (error) {
-                    is HttpTimeoutException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.TIMEOUT, message = "Timed out while contacting Jenkins.")
-                    is ConnectException, is UnknownHostException, is SSLException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNREACHABLE, message = error.message)
-                    else -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNKNOWN, message = error.message)
+                    is HttpTimeoutException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.TIMEOUT, message = "Timed out while contacting Jenkins.", requestUrl = url)
+                    is ConnectException, is UnknownHostException, is SSLException -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNREACHABLE, message = error.message, requestUrl = url)
+                    else -> MerebJenkinsApiProblem(MerebJenkinsApiProblemKind.UNKNOWN, message = error.message, requestUrl = url)
                 }
             )
         }
@@ -404,22 +445,30 @@ class MerebJenkinsJenkinsClient(
                     kind = MerebJenkinsApiProblemKind.UNKNOWN,
                     statusCode = response.statusCode,
                     message = "Jenkins returned HTTP ${response.statusCode} without a redirect target.",
+                    requestUrl = requestUrl,
                 )
             )
         }
+        val baseUri = runCatching { URI.create(normalizedBaseUrl.ensureTrailingSlash()) }.getOrNull()
+        val effectiveUri = runCatching { URI.create(response.effectiveUrl.ifBlank { requestUrl }) }.getOrNull()
         val redirectUrl = runCatching {
-            URI.create(response.effectiveUrl.ifBlank { requestUrl }).resolve(location).toString()
+            when {
+                baseUri == null || effectiveUri == null -> URI.create(response.effectiveUrl.ifBlank { requestUrl }).resolve(location).toString()
+                location.hasAbsoluteScheme() -> URI.create(location).toString()
+                looksLikeAuthRedirectLocation(location) -> baseUri.resolve(location.trimStart('/')).toString()
+                else -> effectiveUri.resolve(location).toString()
+            }
         }.getOrElse {
             return MerebJenkinsApiResult.Failure(
                 MerebJenkinsApiProblem(
                     kind = MerebJenkinsApiProblemKind.UNKNOWN,
                     statusCode = response.statusCode,
                     message = "Jenkins redirected the request to an invalid URL: $location",
+                    requestUrl = requestUrl,
                 )
             )
         }
         val redirectUri = runCatching { URI.create(redirectUrl) }.getOrNull()
-        val baseUri = runCatching { URI.create(normalizedBaseUrl.ensureTrailingSlash()) }.getOrNull()
 
         if (redirectUri == null || baseUri == null) {
             return MerebJenkinsApiResult.Failure(
@@ -427,24 +476,46 @@ class MerebJenkinsJenkinsClient(
                     kind = MerebJenkinsApiProblemKind.UNKNOWN,
                     statusCode = response.statusCode,
                     message = "Jenkins redirected the request to $redirectUrl",
+                    requestUrl = requestUrl,
+                    redirectTarget = redirectUrl,
+                )
+            )
+        }
+        val redirectRelation = if (sameOrigin(baseUri, redirectUri)) "same-origin" else "cross-origin"
+        if (!sameOrigin(baseUri, redirectUri)) {
+            return MerebJenkinsApiResult.Failure(
+                MerebJenkinsApiProblem(
+                    kind = MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT,
+                    statusCode = response.statusCode,
+                    message = "Jenkins redirected the API request to $redirectUrl. Check JENKINS_PUBLIC_URL and any reverse proxy redirect rules.",
+                    requestUrl = requestUrl,
+                    redirectTarget = redirectUrl,
+                    redirectRelation = redirectRelation,
                 )
             )
         }
         if (looksLikeAuthRedirect(redirectUri)) {
             return MerebJenkinsApiResult.Failure(
                 MerebJenkinsApiProblem(
-                    kind = MerebJenkinsApiProblemKind.AUTH,
+                    kind = MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER,
                     statusCode = response.statusCode,
-                    message = "Jenkins redirected the API request to login at ${redirectUri.path.orEmpty()}. Check the saved credentials and your Jenkins OIDC/proxy setup.",
+                    message = "Jenkins redirected the API request to login at ${redirectUri.path.orEmpty()}. If this is a Jenkins API token, your Jenkins OIDC/proxy setup may be intercepting API requests.",
+                    requestUrl = requestUrl,
+                    redirectTarget = redirectUrl,
+                    redirectRelation = redirectRelation,
                 )
             )
         }
-        if (!sameOrigin(baseUri, redirectUri)) {
+        val requestUri = runCatching { URI.create(requestUrl) }.getOrNull()
+        if (requestUri == null || !isSafeCanonicalRedirect(requestUri, redirectUri, baseUri)) {
             return MerebJenkinsApiResult.Failure(
                 MerebJenkinsApiProblem(
                     kind = MerebJenkinsApiProblemKind.UNKNOWN,
                     statusCode = response.statusCode,
-                    message = "Jenkins redirected the API request to $redirectUrl. Check JENKINS_PUBLIC_URL and any reverse proxy redirect rules.",
+                    message = "Jenkins redirected the API request to $redirectUrl, which is not a safe canonical API redirect.",
+                    requestUrl = requestUrl,
+                    redirectTarget = redirectUrl,
+                    redirectRelation = redirectRelation,
                 )
             )
         }
@@ -454,6 +525,9 @@ class MerebJenkinsJenkinsClient(
                     kind = MerebJenkinsApiProblemKind.UNKNOWN,
                     statusCode = response.statusCode,
                     message = "Jenkins kept redirecting API requests. Last redirect target: $redirectUrl",
+                    requestUrl = requestUrl,
+                    redirectTarget = redirectUrl,
+                    redirectRelation = redirectRelation,
                 )
             )
         }
@@ -502,10 +576,24 @@ class MerebJenkinsJenkinsClient(
                 className.contains("OrganizationFolder")
         }
 
+        private fun String.hasAbsoluteScheme(): Boolean = contains("://")
+
         private fun sameOrigin(baseUri: URI, redirectUri: URI): Boolean {
             return baseUri.scheme.equals(redirectUri.scheme, ignoreCase = true) &&
                 baseUri.host.equals(redirectUri.host, ignoreCase = true) &&
                 normalizedPort(baseUri) == normalizedPort(redirectUri)
+        }
+
+        private fun isSafeCanonicalRedirect(requestUri: URI, redirectUri: URI, baseUri: URI): Boolean {
+            if (!sameOrigin(baseUri, redirectUri)) return false
+            val requestPath = normalizePath(requestUri.path)
+            val redirectPath = normalizePath(redirectUri.path)
+            val basePath = normalizePath(baseUri.path)
+            if (requestPath == redirectPath) return true
+            if (requestPath.trimEnd('/') == redirectPath.trimEnd('/')) return true
+            if (basePath.isNotBlank() && redirectPath.endsWith(requestPath) && redirectPath.startsWith(basePath)) return true
+            if (basePath.isNotBlank() && requestPath.endsWith(redirectPath) && requestPath.startsWith(basePath)) return true
+            return false
         }
 
         private fun normalizedPort(uri: URI): Int = when {
@@ -513,6 +601,18 @@ class MerebJenkinsJenkinsClient(
             uri.scheme.equals("https", ignoreCase = true) -> 443
             uri.scheme.equals("http", ignoreCase = true) -> 80
             else -> -1
+        }
+
+        private fun normalizePath(value: String?): String = value.orEmpty().ifBlank { "/" }
+
+        private fun looksLikeAuthRedirectLocation(location: String): Boolean {
+            val value = location.trim().trimStart('/').lowercase()
+            return value.startsWith("securityrealm/") ||
+                value.startsWith("login") ||
+                value.startsWith("oauth") ||
+                value.startsWith("openid") ||
+                value.startsWith("sso") ||
+                value.startsWith("realms/")
         }
 
         private fun looksLikeAuthRedirect(uri: URI): Boolean {
@@ -525,6 +625,19 @@ class MerebJenkinsJenkinsClient(
                 path.contains("/sso") ||
                 path.contains("/realms/") ||
                 query.contains("from=") && path.contains("/login")
+        }
+
+        private fun looksLikeSameUser(actualName: String?, configuredUsername: String): Boolean {
+            val normalizedConfigured = normalizeUserIdentity(configuredUsername)
+            if (normalizedConfigured.isBlank()) return false
+            val actual = actualName?.trim().orEmpty()
+            if (actual.isBlank()) return false
+            val candidates = linkedSetOf(actual, actual.substringBefore('@'), actual.substringAfterLast('\\'))
+            return candidates.any { normalizeUserIdentity(it) == normalizedConfigured }
+        }
+
+        private fun normalizeUserIdentity(value: String): String {
+            return value.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
         }
     }
 }
@@ -542,6 +655,11 @@ internal fun MerebJenkinsApiResult<Map<String, Any?>>.mapToController(): MerebJe
 
 internal fun <T, R> MerebJenkinsApiResult<T>.mapSuccess(transform: (T) -> R): MerebJenkinsApiResult<R> = when (this) {
     is MerebJenkinsApiResult.Success -> MerebJenkinsApiResult.Success(transform(value))
+    is MerebJenkinsApiResult.Failure -> this
+}
+
+internal fun <T, R> MerebJenkinsApiResult<T>.flatMapSuccess(transform: (T) -> MerebJenkinsApiResult<R>): MerebJenkinsApiResult<R> = when (this) {
+    is MerebJenkinsApiResult.Success -> transform(value)
     is MerebJenkinsApiResult.Failure -> this
 }
 

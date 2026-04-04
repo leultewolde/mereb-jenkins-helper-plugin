@@ -47,6 +47,21 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
+    fun `state service maps legacy unreachable status to controller unreachable`() {
+        val service = MerebJenkinsJenkinsStateService()
+
+        service.loadState(
+            MerebJenkinsPersistedState(
+                baseUrl = "https://jenkins.example.com/",
+                username = "leul",
+                lastConnectionStatus = "UNREACHABLE",
+            )
+        )
+
+        assertEquals(MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE, service.snapshot().status)
+    }
+
+    @Test
     fun `job resolver auto selects exact root match and persists mapping`() {
         val service = MerebJenkinsJenkinsStateService()
         val transport = fakeTransport(
@@ -183,6 +198,21 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
+    fun `jenkins client validates connection through authenticated user endpoint`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous" to ok("""{"authenticated":true,"anonymous":false,"name":"leul"}"""),
+            "https://jenkins.example.com/api/json" to ok("""{"mode":"NORMAL","nodeName":"built-in"}"""),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.validateConnection()
+
+        val validation = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsConnectionValidation>>(result).value
+        assertEquals("leul", validation.user.name)
+        assertEquals("built-in", validation.controller?.nodeName)
+    }
+
+    @Test
     fun `jenkins client follows same-origin canonical redirects`() {
         val transport = fakeTransport(
             "https://jenkins.example.com/api/json" to MerebJenkinsHttpResponse(
@@ -202,22 +232,46 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
-    fun `jenkins client reports login redirects as auth failures`() {
+    fun `jenkins client normalizes relative login redirects against controller root`() {
         val transport = fakeTransport(
-            "https://jenkins.example.com/api/json" to MerebJenkinsHttpResponse(
+            "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous" to MerebJenkinsHttpResponse(
                 statusCode = 302,
                 body = "",
-                effectiveUrl = "https://jenkins.example.com/api/json",
-                headers = mapOf("location" to listOf("/login?from=%2Fapi%2Fjson")),
+                effectiveUrl = "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous",
+                headers = mapOf("location" to listOf("securityRealm/commenceLogin?from=%2FwhoAmI%2Fapi%2Fjson")),
             ),
         )
         val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
 
-        val result = client.validateController()
+        val result = client.validateConnection()
 
         val failure = assertIs<MerebJenkinsApiResult.Failure>(result)
-        assertEquals(MerebJenkinsApiProblemKind.AUTH, failure.problem.kind)
-        assertTrue(failure.problem.message.orEmpty().contains("redirected"))
+        assertEquals(MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER, failure.problem.kind)
+        assertEquals(
+            "https://jenkins.example.com/securityRealm/commenceLogin?from=%2FwhoAmI%2Fapi%2Fjson",
+            failure.problem.redirectTarget,
+        )
+        assertEquals("same-origin", failure.problem.redirectRelation)
+        assertTrue(failure.problem.message.orEmpty().contains("OIDC/proxy"))
+    }
+
+    @Test
+    fun `jenkins client classifies cross origin redirects as proxy issues`() {
+        val transport = fakeTransport(
+            "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous" to MerebJenkinsHttpResponse(
+                statusCode = 302,
+                body = "",
+                effectiveUrl = "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous",
+                headers = mapOf("location" to listOf("https://auth.example.com/realms/hidmo/protocol/openid-connect/auth")),
+            ),
+        )
+        val client = MerebJenkinsJenkinsClient("https://jenkins.example.com", "leul", "token", transport)
+
+        val result = client.validateConnection()
+
+        val failure = assertIs<MerebJenkinsApiResult.Failure>(result)
+        assertEquals(MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT, failure.problem.kind)
+        assertEquals("cross-origin", failure.problem.redirectRelation)
     }
 
     @Test

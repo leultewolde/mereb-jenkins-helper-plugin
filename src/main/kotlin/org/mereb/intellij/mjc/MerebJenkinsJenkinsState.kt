@@ -13,7 +13,9 @@ enum class MerebJenkinsConnectionStatus {
     DISCONNECTED,
     CONNECTED,
     AUTH_FAILED,
-    UNREACHABLE,
+    REDIRECTED_TO_LOGIN,
+    PROXY_OR_BASE_URL_ISSUE,
+    CONTROLLER_UNREACHABLE,
     ERROR,
 }
 
@@ -23,6 +25,9 @@ data class MerebJenkinsConnectionSnapshot(
     val status: MerebJenkinsConnectionStatus,
     val lastValidatedAt: Long? = null,
     val lastErrorMessage: String? = null,
+    val lastRequestUrl: String? = null,
+    val lastRedirectTarget: String? = null,
+    val lastRedirectRelation: String? = null,
 ) {
     val isConfigured: Boolean
         get() = baseUrl.isNotBlank() && username.isNotBlank()
@@ -42,14 +47,30 @@ data class MerebJenkinsControllerInfo(
     val useCrumbs: Boolean = false,
 )
 
+data class MerebJenkinsAuthenticatedUser(
+    val name: String? = null,
+    val authenticated: Boolean = false,
+    val anonymous: Boolean = false,
+)
+
+data class MerebJenkinsConnectionValidation(
+    val user: MerebJenkinsAuthenticatedUser,
+    val controller: MerebJenkinsControllerInfo? = null,
+)
+
 data class MerebJenkinsApiProblem(
     val kind: MerebJenkinsApiProblemKind,
     val statusCode: Int? = null,
     val message: String? = null,
+    val requestUrl: String? = null,
+    val redirectTarget: String? = null,
+    val redirectRelation: String? = null,
 )
 
 enum class MerebJenkinsApiProblemKind {
     AUTH,
+    LOGIN_REDIRECT_WITH_AUTH_HEADER,
+    CROSS_ORIGIN_REDIRECT,
     NOT_FOUND,
     UNREACHABLE,
     TIMEOUT,
@@ -75,6 +96,9 @@ data class MerebJenkinsPersistedState(
     var lastConnectionStatus: String = MerebJenkinsConnectionStatus.DISCONNECTED.name,
     var lastValidatedAt: Long = 0L,
     var lastErrorMessage: String = "",
+    var lastRequestUrl: String = "",
+    var lastRedirectTarget: String = "",
+    var lastRedirectRelation: String = "",
     var jobMappings: MutableList<MerebJenkinsJobMappingState> = mutableListOf(),
 )
 
@@ -91,6 +115,9 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
             username = state.username.trim(),
             lastConnectionStatus = state.lastConnectionStatus.ifBlank { MerebJenkinsConnectionStatus.DISCONNECTED.name },
             lastErrorMessage = state.lastErrorMessage.trim(),
+            lastRequestUrl = state.lastRequestUrl.trim(),
+            lastRedirectTarget = state.lastRedirectTarget.trim(),
+            lastRedirectRelation = state.lastRedirectRelation.trim(),
             jobMappings = state.jobMappings
                 .filter { it.projectRootPath.isNotBlank() && it.jobPath.isNotBlank() }
                 .map {
@@ -107,14 +134,20 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
     }
 
     fun snapshot(): MerebJenkinsConnectionSnapshot {
-        val status = runCatching { MerebJenkinsConnectionStatus.valueOf(state.lastConnectionStatus) }
-            .getOrDefault(MerebJenkinsConnectionStatus.DISCONNECTED)
+        val status = when (state.lastConnectionStatus.trim()) {
+            "UNREACHABLE" -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
+            else -> runCatching { MerebJenkinsConnectionStatus.valueOf(state.lastConnectionStatus) }
+                .getOrDefault(MerebJenkinsConnectionStatus.DISCONNECTED)
+        }
         return MerebJenkinsConnectionSnapshot(
             baseUrl = normalizeBaseUrl(state.baseUrl).ifBlank { DEFAULT_BASE_URL },
             username = state.username.trim(),
             status = status,
             lastValidatedAt = state.lastValidatedAt.takeIf { it > 0L },
             lastErrorMessage = state.lastErrorMessage.ifBlank { null },
+            lastRequestUrl = state.lastRequestUrl.ifBlank { null },
+            lastRedirectTarget = state.lastRedirectTarget.ifBlank { null },
+            lastRedirectRelation = state.lastRedirectRelation.ifBlank { null },
         )
     }
 
@@ -128,6 +161,9 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
         state.lastConnectionStatus = MerebJenkinsConnectionStatus.DISCONNECTED.name
         state.lastErrorMessage = ""
         state.lastValidatedAt = 0L
+        state.lastRequestUrl = ""
+        state.lastRedirectTarget = ""
+        state.lastRedirectRelation = ""
 
         val baseUrlChanged = previous.baseUrl != normalizedBaseUrl || previous.username != normalizedUsername
         if (baseUrlChanged) {
@@ -144,10 +180,20 @@ class MerebJenkinsJenkinsStateService : PersistentStateComponent<MerebJenkinsPer
         }
     }
 
-    fun recordConnectionStatus(status: MerebJenkinsConnectionStatus, errorMessage: String? = null, validatedAt: Long? = null) {
+    fun recordConnectionStatus(
+        status: MerebJenkinsConnectionStatus,
+        errorMessage: String? = null,
+        validatedAt: Long? = null,
+        requestUrl: String? = null,
+        redirectTarget: String? = null,
+        redirectRelation: String? = null,
+    ) {
         state.lastConnectionStatus = status.name
         state.lastErrorMessage = errorMessage.orEmpty()
         state.lastValidatedAt = validatedAt ?: if (status == MerebJenkinsConnectionStatus.CONNECTED) System.currentTimeMillis() else state.lastValidatedAt
+        state.lastRequestUrl = requestUrl.orEmpty()
+        state.lastRedirectTarget = redirectTarget.orEmpty()
+        state.lastRedirectRelation = redirectRelation.orEmpty()
     }
 
     fun hasStoredToken(baseUrl: String = snapshot().baseUrl, username: String = snapshot().username): Boolean {

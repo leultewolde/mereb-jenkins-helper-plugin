@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets
 import javax.swing.Action
 import javax.swing.JComponent
 import javax.swing.JPanel
+import javax.swing.SwingConstants
 
 class MerebJenkinsConnectionDialog(
     project: Project?,
@@ -37,6 +38,12 @@ class MerebJenkinsConnectionDialog(
     private val tokenHintLabel = JBLabel().apply { font = JBFont.small() }
     private val statusLabel = JBLabel("Enter your Jenkins username and API token.").apply {
         border = JBUI.Borders.emptyTop(8)
+    }
+    private val diagnosticsLabel = JBLabel().apply {
+        font = JBFont.small()
+        verticalAlignment = SwingConstants.TOP
+        border = JBUI.Borders.emptyTop(4)
+        isVisible = false
     }
 
     init {
@@ -53,6 +60,7 @@ class MerebJenkinsConnectionDialog(
             .addLabeledComponent("API token", tokenField)
             .addComponent(tokenHintLabel)
             .addComponent(statusLabel)
+            .addComponent(diagnosticsLabel)
             .panel
     }
 
@@ -96,9 +104,9 @@ class MerebJenkinsConnectionDialog(
     private fun refreshTokenHint() {
         val hasStored = stateService.hasStoredToken(currentBaseUrl().ifBlank { snapshot.baseUrl }, currentUsername().ifBlank { snapshot.username })
         tokenHintLabel.text = if (hasStored) {
-            "A token is already stored in IntelliJ Password Safe for this Jenkins user."
+            "Use a Jenkins API token from your Jenkins user profile. A token is already stored in IntelliJ Password Safe for this Jenkins user."
         } else {
-            "The token will be stored securely in IntelliJ Password Safe."
+            "Use a Jenkins API token from your Jenkins user profile. The token will be stored securely in IntelliJ Password Safe."
         }
     }
 
@@ -126,10 +134,13 @@ class MerebJenkinsConnectionDialog(
         val token = currentToken()
         if (baseUrl.isBlank() || username.isBlank()) {
             statusLabel.text = "Enter both the Jenkins URL and username before testing the connection."
+            diagnosticsLabel.isVisible = false
             return
         }
         setErrorText(null)
         statusLabel.text = "Testing Jenkins connection…"
+        diagnosticsLabel.text = ""
+        diagnosticsLabel.isVisible = false
         statusLabel.revalidate()
         statusLabel.repaint()
         ApplicationManager.getApplication().executeOnPooledThread {
@@ -142,27 +153,35 @@ class MerebJenkinsConnectionDialog(
                     )
                 )
             } else {
-                MerebJenkinsJenkinsClient(baseUrl, username, effectiveToken).validateController()
+                MerebJenkinsJenkinsClient(baseUrl, username, effectiveToken).validateConnection()
             }
             ApplicationManager.getApplication().invokeLater {
                 statusLabel.text = when (result) {
                     is MerebJenkinsApiResult.Success -> {
                         stateService.recordConnectionStatus(MerebJenkinsConnectionStatus.CONNECTED, null, System.currentTimeMillis())
-                        "Connected to Jenkins${result.value.nodeName?.let { " ($it)" } ?: ""}."
+                        diagnosticsLabel.isVisible = false
+                        "Connected to Jenkins as ${result.value.user.name ?: username}${result.value.controller?.nodeName?.let { " ($it)" } ?: ""}."
                     }
                     is MerebJenkinsApiResult.Failure -> {
-                        val status = when (result.problem.kind) {
-                            MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
-                            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.UNREACHABLE
-                            else -> MerebJenkinsConnectionStatus.ERROR
-                        }
-                        stateService.recordConnectionStatus(status, result.problem.message, null)
+                        val status = connectionStatusForProblem(result.problem)
+                        stateService.recordConnectionStatus(
+                            status,
+                            result.problem.message,
+                            null,
+                            result.problem.requestUrl,
+                            result.problem.redirectTarget,
+                            result.problem.redirectRelation,
+                        )
+                        diagnosticsLabel.text = buildDiagnosticsHtml(baseUrl, result.problem)
+                        diagnosticsLabel.isVisible = diagnosticsLabel.text.isNotBlank()
                         result.problem.message ?: "Unable to connect to Jenkins."
                     }
                 }
                 refreshTokenHint()
                 statusLabel.revalidate()
                 statusLabel.repaint()
+                diagnosticsLabel.revalidate()
+                diagnosticsLabel.repaint()
             }
         }
     }
@@ -327,18 +346,21 @@ class MerebJenkinsSettingsConfigurable : SearchableConfigurable {
                     )
                 )
             } else {
-                MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token).validateController()
+                MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token).validateConnection()
             }
             ApplicationManager.getApplication().invokeLater {
                 when (result) {
                     is MerebJenkinsApiResult.Success -> stateService.recordConnectionStatus(MerebJenkinsConnectionStatus.CONNECTED, null, System.currentTimeMillis())
                     is MerebJenkinsApiResult.Failure -> {
-                        val status = when (result.problem.kind) {
-                            MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
-                            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.UNREACHABLE
-                            else -> MerebJenkinsConnectionStatus.ERROR
-                        }
-                        stateService.recordConnectionStatus(status, result.problem.message, null)
+                        val status = connectionStatusForProblem(result.problem)
+                        stateService.recordConnectionStatus(
+                            status,
+                            result.problem.message,
+                            null,
+                            result.problem.requestUrl,
+                            result.problem.redirectTarget,
+                            result.problem.redirectRelation,
+                        )
                     }
                 }
                 refreshSummary()
@@ -352,12 +374,62 @@ class MerebJenkinsSettingsConfigurable : SearchableConfigurable {
         usernameValue.text = snapshot.username.ifBlank { "Not configured" }
         tokenValue.text = if (snapshot.isConfigured && stateService.hasStoredToken(snapshot.baseUrl, snapshot.username)) "Stored in Password Safe" else "Missing"
         statusValue.text = snapshot.status.name.lowercase().replace('_', ' ')
-        validatedValue.text = snapshot.lastValidatedAt?.let { java.time.Instant.ofEpochMilli(it).toString() } ?: "Never"
+        validatedValue.text = buildString {
+            append(snapshot.lastValidatedAt?.let { java.time.Instant.ofEpochMilli(it).toString() } ?: "Never")
+            snapshot.lastRequestUrl?.let { append(" • "); append(it) }
+            snapshot.lastRedirectTarget?.let {
+                append(" • redirect ")
+                append(snapshot.lastRedirectRelation ?: "")
+                append(" -> ")
+                append(it)
+            }
+        }
     }
 }
 
 internal object MerebJenkinsConnectionSupport {
     fun showConnectionDialog(project: Project?, onSaved: (() -> Unit)? = null) {
         MerebJenkinsConnectionDialog(project, onSaved).show()
+    }
+}
+
+private fun escapeHtml(value: String): String = buildString(value.length) {
+    value.forEach { character ->
+        append(
+            when (character) {
+                '&' -> "&amp;"
+                '<' -> "&lt;"
+                '>' -> "&gt;"
+                '"' -> "&quot;"
+                '\'' -> "&#39;"
+                else -> character
+            }
+        )
+    }
+}
+
+private fun connectionStatusForProblem(problem: MerebJenkinsApiProblem): MerebJenkinsConnectionStatus = when (problem.kind) {
+    MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
+    MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER -> MerebJenkinsConnectionStatus.REDIRECTED_TO_LOGIN
+    MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT -> MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE
+    MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
+    else -> MerebJenkinsConnectionStatus.ERROR
+}
+
+private fun buildDiagnosticsHtml(baseUrl: String, problem: MerebJenkinsApiProblem): String {
+    val details = listOfNotNull(
+        "Validated base URL: ${escapeHtml(baseUrl)}",
+        problem.requestUrl?.let { "Request: ${escapeHtml(it)}" },
+        problem.redirectTarget?.let { "Redirect: ${escapeHtml(it)}" },
+        problem.redirectRelation?.let { "Redirect type: ${escapeHtml(it)}" },
+    )
+    if (details.isEmpty()) return ""
+    return buildString {
+        append("<html><body>")
+        details.forEachIndexed { index, detail ->
+            if (index > 0) append("<br/>")
+            append(detail)
+        }
+        append("</body></html>")
     }
 }

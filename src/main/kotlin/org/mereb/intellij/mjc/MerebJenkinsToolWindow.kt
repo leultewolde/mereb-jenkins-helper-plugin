@@ -155,6 +155,10 @@ private class MerebJenkinsToolWindowPanel(
     private val jenkinsErrorLabel = JBLabel("").apply {
         foreground = toneColor(Tone.ERROR)
     }
+    private val jenkinsDiagnosticsLabel = JBLabel("").apply {
+        font = JBFont.small()
+        foreground = JBColor.GRAY
+    }
     private val jenkinsVariantLabel = JBLabel("View:")
     private val jenkinsVariantSelector = ComboBox<MerebJenkinsJobCandidate>()
     private val jenkinsVariantHintLabel = JBLabel("Defaulting to the current branch when possible.")
@@ -308,11 +312,12 @@ private class MerebJenkinsToolWindowPanel(
     }
 
     private fun buildJenkinsTab(): JComponent = JPanel(BorderLayout(0, 10)).apply {
-        val statusStack = JPanel(GridLayout(4, 1, 0, 6)).apply {
+        val statusStack = JPanel(GridLayout(0, 1, 0, 6)).apply {
             add(jenkinsStatusLabel)
             add(jenkinsJobLabel)
             add(jenkinsRefreshLabel)
             add(jenkinsErrorLabel)
+            add(jenkinsDiagnosticsLabel)
         }
         val selectorRow = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0)).apply {
             add(jenkinsVariantLabel)
@@ -645,6 +650,18 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsRefreshTask = application.executeOnPooledThread {
             if (isDisposedOrStaleJenkins(refreshId)) return@executeOnPooledThread
             val client = MerebJenkinsJenkinsClient(snapshot.baseUrl, snapshot.username, token)
+            when (val validation = client.validateConnection()) {
+                is MerebJenkinsApiResult.Failure -> {
+                    recordConnectionProblem(validation.problem)
+                    application.invokeLater({
+                        if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
+                        currentJenkinsProblem = validation.problem
+                        renderJenkinsProblem(validation.problem, preserveLiveData = shouldPreserveLiveData(target))
+                    }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
+                    return@executeOnPooledThread
+                }
+                is MerebJenkinsApiResult.Success -> Unit
+            }
             val visibleJobsResult = client.fetchVisibleJobs()
             val visibleJobs = when (visibleJobsResult) {
                 is MerebJenkinsApiResult.Success -> visibleJobsResult.value
@@ -653,8 +670,7 @@ private class MerebJenkinsToolWindowPanel(
                     application.invokeLater({
                         if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
                         currentJenkinsProblem = visibleJobsResult.problem
-                        currentJobVariantSelection = null
-                        renderJenkinsProblem(snapshot, visibleJobsResult.problem)
+                        renderJenkinsProblem(visibleJobsResult.problem, preserveLiveData = shouldPreserveLiveData(target))
                     }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
                     return@executeOnPooledThread
                 }
@@ -687,7 +703,7 @@ private class MerebJenkinsToolWindowPanel(
                                 currentJobVariantSelection = variantSelection
                                 currentLiveData = live.value
                                 currentJenkinsProblem = null
-                                renderJenkinsLive(snapshot, resolution.mapping, variantSelection, live.value, resolution.autoSelected)
+                                renderJenkinsLive(resolution.mapping, variantSelection, live.value, resolution.autoSelected)
                                 scheduleNextJenkinsPoll()
                             }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
                         }
@@ -705,7 +721,7 @@ private class MerebJenkinsToolWindowPanel(
                                     currentJobMapping = resolution.mapping
                                     currentJobVariantSelection = variantSelection
                                     currentJenkinsProblem = live.problem
-                                    renderJenkinsProblem(snapshot, live.problem)
+                                    renderJenkinsProblem(live.problem, preserveLiveData = shouldPreserveLiveData(target))
                                 }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
                             }
                         }
@@ -728,7 +744,7 @@ private class MerebJenkinsToolWindowPanel(
                     application.invokeLater({
                         if (isDisposedOrStaleJenkins(refreshId)) return@invokeLater
                         currentJenkinsProblem = resolution.problem
-                        renderJenkinsProblem(snapshot, resolution.problem)
+                        renderJenkinsProblem(resolution.problem, preserveLiveData = shouldPreserveLiveData(target))
                     }, ModalityState.any(), Condition<Any?> { isDisposedOrStaleJenkins(refreshId) })
                 }
             }
@@ -771,6 +787,7 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsJobLabel.text = "Mapped job: none"
         jenkinsRefreshLabel.text = "Last refresh: never"
         jenkinsErrorLabel.text = ""
+        jenkinsDiagnosticsLabel.text = ""
         jenkinsConnectionCard.update(
             "Disconnected",
             snapshot.baseUrl.ifBlank { "Configure Jenkins" },
@@ -791,6 +808,7 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsJobLabel.text = "Mapped job: choose one of $matchCount candidates"
         jenkinsRefreshLabel.text = "Last refresh: waiting for job selection"
         jenkinsErrorLabel.text = "Use Remap Job to select the Jenkins job that should power live data."
+        jenkinsDiagnosticsLabel.text = ""
         jenkinsConnectionCard.update("Connected", "Jenkins connection is ready.", Tone.SUCCESS)
         jenkinsJobCard.update("Selection required", "$matchCount candidate jobs found.", Tone.WARNING)
         jenkinsBuildCard.update("No data", "Live data will load once a job is selected.", Tone.NEUTRAL)
@@ -807,18 +825,30 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsJobLabel.text = "Searched for: ${searchedLabels.joinToString(", ").ifBlank { "current project labels" }}"
         jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(System.currentTimeMillis())}"
         jenkinsErrorLabel.text = "Use Remap Job after creating the Jenkins job or adjust the job naming."
+        jenkinsDiagnosticsLabel.text = ""
         jenkinsConnectionCard.update("Connected", "Jenkins connection is ready.", Tone.SUCCESS)
         jenkinsJobCard.update("No match", searchedLabels.joinToString(", ").ifBlank { "No matching job" }, Tone.WARNING)
         jenkinsBuildCard.update("No data", "No Jenkins job is mapped for this project.", Tone.NEUTRAL)
         updateButtons()
     }
 
-    private fun renderJenkinsProblem(snapshot: MerebJenkinsConnectionSnapshot, problem: MerebJenkinsApiProblem) {
-        currentLiveData = null
-        clearJenkinsModels()
+    private fun renderJenkinsProblem(problem: MerebJenkinsApiProblem, preserveLiveData: Boolean) {
+        val snapshot = jenkinsStateService.snapshot()
+        val staleLiveData = if (preserveLiveData) currentLiveData else null
+        if (staleLiveData == null) {
+            currentLiveData = null
+            clearJenkinsModels()
+        } else {
+            refill(jenkinsRunsModel, staleLiveData.runs)
+            refill(jenkinsStagesModel, staleLiveData.selectedRun?.stages.orEmpty())
+            refill(jenkinsPendingModel, staleLiveData.pendingInputs)
+            refill(jenkinsArtifactsModel, staleLiveData.artifacts)
+        }
         updateJobVariantSelector(currentJobVariantSelection)
         jenkinsStatusLabel.text = when (problem.kind) {
             MerebJenkinsApiProblemKind.AUTH -> "Jenkins authentication failed."
+            MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER -> "Auth redirect detected."
+            MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT -> "Proxy or base URL issue detected."
             MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> "Jenkins is unreachable."
             MerebJenkinsApiProblemKind.NOT_FOUND -> "The mapped Jenkins job no longer exists."
             MerebJenkinsApiProblemKind.INVALID_RESPONSE -> "Jenkins returned a response the plugin could not interpret."
@@ -827,25 +857,34 @@ private class MerebJenkinsToolWindowPanel(
         jenkinsJobLabel.text = currentJobVariantSelection?.selected?.let { "Viewing job: ${it.jobDisplayName} (${it.jobPath})" }
             ?: currentJobMapping?.let { "Mapped job: ${it.jobDisplayName} (${it.jobPath})" }
             ?: "Mapped job: none"
-        jenkinsRefreshLabel.text = "Last refresh: ${formatTimestamp(System.currentTimeMillis())}"
+        jenkinsRefreshLabel.text = if (staleLiveData != null) {
+            "Last good refresh: ${formatTimestamp(staleLiveData.refreshedAt)} (data stale)"
+        } else {
+            "Last refresh: ${formatTimestamp(System.currentTimeMillis())}"
+        }
         jenkinsErrorLabel.text = problem.message.orEmpty()
+        jenkinsDiagnosticsLabel.text = buildJenkinsDiagnosticsText(snapshot, problem)
         jenkinsConnectionCard.update(
-            snapshot.status.name.lowercase().replace('_', ' ').replaceFirstChar(Char::titlecase),
-            snapshot.baseUrl,
-            toneForConnectionStatus(snapshot.status)
+            if (staleLiveData != null) "Connected, data stale" else snapshot.status.name.lowercase().replace('_', ' ').replaceFirstChar(Char::titlecase),
+            buildJenkinsConnectionDetail(snapshot, problem),
+            if (staleLiveData != null) Tone.WARNING else toneForConnectionStatus(snapshot.status)
         )
-        jenkinsJobCard.update(currentJobMapping?.jobDisplayName ?: "Unmapped", currentJobMapping?.jobPath ?: "No Jenkins job mapping.", Tone.WARNING)
-        jenkinsBuildCard.update("Unavailable", problem.message ?: "Unable to load Jenkins build data.", Tone.ERROR)
+        jenkinsJobCard.update(currentJobMapping?.jobDisplayName ?: "Unmapped", currentJobMapping?.jobPath ?: "No Jenkins job mapping.", if (staleLiveData != null) Tone.INFO else Tone.WARNING)
+        jenkinsBuildCard.update(
+            if (staleLiveData != null) "Stale" else "Unavailable",
+            if (staleLiveData != null) "Showing last known good Jenkins data." else (problem.message ?: "Unable to load Jenkins build data."),
+            if (staleLiveData != null) Tone.WARNING else Tone.ERROR
+        )
         updateButtons()
     }
 
     private fun renderJenkinsLive(
-        snapshot: MerebJenkinsConnectionSnapshot,
         mapping: MerebJenkinsJobMapping,
         variantSelection: MerebJenkinsJobVariantSelection,
         liveData: MerebJenkinsLiveJobData,
         autoSelected: Boolean,
     ) {
+        val snapshot = jenkinsStateService.snapshot()
         updateJobVariantSelector(variantSelection)
         refill(jenkinsRunsModel, liveData.runs)
         refill(jenkinsStagesModel, liveData.selectedRun?.stages.orEmpty())
@@ -859,6 +898,7 @@ private class MerebJenkinsToolWindowPanel(
         } else {
             "Pipeline stage details are unavailable for this Jenkins job."
         }
+        jenkinsDiagnosticsLabel.text = ""
         jenkinsConnectionCard.update(
             "Connected",
             "${snapshot.username} @ ${snapshot.baseUrl}",
@@ -923,10 +963,47 @@ private class MerebJenkinsToolWindowPanel(
     private fun recordConnectionProblem(problem: MerebJenkinsApiProblem) {
         val status = when (problem.kind) {
             MerebJenkinsApiProblemKind.AUTH -> MerebJenkinsConnectionStatus.AUTH_FAILED
-            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.UNREACHABLE
+            MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER -> MerebJenkinsConnectionStatus.REDIRECTED_TO_LOGIN
+            MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT -> MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE
+            MerebJenkinsApiProblemKind.UNREACHABLE, MerebJenkinsApiProblemKind.TIMEOUT -> MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE
             else -> MerebJenkinsConnectionStatus.ERROR
         }
-        jenkinsStateService.recordConnectionStatus(status, problem.message)
+        jenkinsStateService.recordConnectionStatus(
+            status,
+            problem.message,
+            null,
+            problem.requestUrl,
+            problem.redirectTarget,
+            problem.redirectRelation,
+        )
+    }
+
+    private fun shouldPreserveLiveData(target: MerebJenkinsWorkspaceTarget): Boolean {
+        return currentLiveData != null && currentJobMapping?.projectRootPath == target.projectRootPath
+    }
+
+    private fun buildJenkinsConnectionDetail(snapshot: MerebJenkinsConnectionSnapshot, problem: MerebJenkinsApiProblem): String {
+        return when {
+            problem.kind == MerebJenkinsApiProblemKind.LOGIN_REDIRECT_WITH_AUTH_HEADER ->
+                "Use a Jenkins API token. If this token is valid, your Jenkins OIDC/proxy setup may be intercepting API requests."
+            problem.kind == MerebJenkinsApiProblemKind.CROSS_ORIGIN_REDIRECT ->
+                "Check JENKINS_PUBLIC_URL, proxy redirects, and controller canonical URL handling."
+            snapshot.baseUrl.isNotBlank() -> snapshot.baseUrl
+            else -> "Configure Jenkins"
+        }
+    }
+
+    private fun buildJenkinsDiagnosticsText(
+        snapshot: MerebJenkinsConnectionSnapshot,
+        problem: MerebJenkinsApiProblem,
+    ): String {
+        val parts = listOfNotNull(
+            snapshot.baseUrl.ifBlank { null }?.let { "Base URL: $it" },
+            problem.requestUrl?.let { "Request: $it" },
+            problem.redirectTarget?.let { "Redirect: $it" },
+            problem.redirectRelation?.let { "Redirect type: $it" },
+        )
+        return parts.joinToString("  •  ")
     }
 
     private fun applySafeFixes() {
@@ -1301,7 +1378,9 @@ private fun toneColor(tone: Tone): java.awt.Color = when (tone) {
 private fun toneForConnectionStatus(status: MerebJenkinsConnectionStatus): Tone = when (status) {
     MerebJenkinsConnectionStatus.CONNECTED -> Tone.SUCCESS
     MerebJenkinsConnectionStatus.AUTH_FAILED -> Tone.ERROR
-    MerebJenkinsConnectionStatus.UNREACHABLE -> Tone.WARNING
+    MerebJenkinsConnectionStatus.REDIRECTED_TO_LOGIN -> Tone.WARNING
+    MerebJenkinsConnectionStatus.PROXY_OR_BASE_URL_ISSUE -> Tone.ERROR
+    MerebJenkinsConnectionStatus.CONTROLLER_UNREACHABLE -> Tone.WARNING
     MerebJenkinsConnectionStatus.ERROR -> Tone.ERROR
     MerebJenkinsConnectionStatus.DISCONNECTED -> Tone.NEUTRAL
 }
