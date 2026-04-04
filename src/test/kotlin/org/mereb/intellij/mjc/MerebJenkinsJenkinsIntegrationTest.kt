@@ -254,6 +254,32 @@ class MerebJenkinsJenkinsIntegrationTest {
     }
 
     @Test
+    fun `fallback transport retries edge filtered responses through curl-like transport`() {
+        val primary = MerebJenkinsHttpTransport { _, _ ->
+            MerebJenkinsHttpResponse(
+                statusCode = 403,
+                body = "<html>Cloudflare Error code 1010 browser signature banned</html>",
+                effectiveUrl = "https://jenkins.example.com/whoAmI/api/json?tree=authenticated,name,anonymous",
+                headers = mapOf("server" to listOf("cloudflare"), "cf-ray" to listOf("abcd")),
+            )
+        }
+        val fallback = MerebJenkinsHttpTransport { _, _ ->
+            ok("""{"authenticated":true,"anonymous":false,"name":"leul"}""")
+        }
+        val client = MerebJenkinsJenkinsClient(
+            "https://jenkins.example.com",
+            "leul",
+            "token",
+            MerebJenkinsFallbackHttpTransport(primary, fallback),
+        )
+
+        val result = client.validateConnection()
+
+        val validation = assertIs<MerebJenkinsApiResult.Success<MerebJenkinsConnectionValidation>>(result).value
+        assertEquals("leul", validation.user.name)
+    }
+
+    @Test
     fun `jenkins client follows same-origin canonical redirects`() {
         val transport = fakeTransport(
             "https://jenkins.example.com/api/json" to MerebJenkinsHttpResponse(

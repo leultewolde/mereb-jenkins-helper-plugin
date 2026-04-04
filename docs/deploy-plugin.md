@@ -98,7 +98,7 @@ This one-time reinstall is required because IntelliJ treats the new plugin ID as
 3. Click the gear icon.
 4. Choose `Manage Plugin Repositories...`.
 5. Add:
-   `https://<github-user-or-org>.github.io/mereb-jenkins-helper-plugin/updatePlugins.xml`
+   `https://leultewolde.github.io/mereb-jenkins-helper-plugin/updatePlugins.xml`
 6. Search for `Mereb Jenkins Helper` in the Plugins UI and install it.
 
 After that, IntelliJ checks the same repository URL for updates.

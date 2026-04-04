@@ -10,8 +10,10 @@ import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.net.http.HttpTimeoutException
 import java.nio.charset.StandardCharsets
+import java.nio.file.Files
 import java.time.Duration
 import java.util.Base64
+import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLException
 import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
@@ -123,11 +125,121 @@ class MerebJenkinsJdkHttpTransport(
     }
 }
 
+class MerebJenkinsCurlHttpTransport(
+    private val connectTimeoutSeconds: Long = 5,
+    private val requestTimeoutSeconds: Long = 10,
+) : MerebJenkinsHttpTransport {
+    override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+        val headersFile = Files.createTempFile("mereb-jenkins-curl-headers", ".txt")
+        val bodyFile = Files.createTempFile("mereb-jenkins-curl-body", ".txt")
+        try {
+            val process = ProcessBuilder("curl", "--config", "-")
+                .redirectErrorStream(true)
+                .start()
+
+            val config = buildString {
+                appendLine("url = \"$url\"")
+                appendLine("silent")
+                appendLine("show-error")
+                appendLine("connect-timeout = $connectTimeoutSeconds")
+                appendLine("max-time = $requestTimeoutSeconds")
+                appendLine("dump-header = \"${headersFile.toAbsolutePath()}\"")
+                appendLine("output = \"${bodyFile.toAbsolutePath()}\"")
+                appendLine("write-out = \"%{http_code}\\n%{url_effective}\"")
+                headers.forEach { (name, value) ->
+                    appendLine("header = \"$name: ${escapeCurlConfigValue(value)}\"")
+                }
+            }
+            process.outputStream.bufferedWriter().use { writer ->
+                writer.write(config)
+            }
+            if (!process.waitFor(requestTimeoutSeconds + 2, TimeUnit.SECONDS)) {
+                process.destroyForcibly()
+                throw HttpTimeoutException("curl timed out while contacting Jenkins")
+            }
+            val writeOut = process.inputStream.bufferedReader().use { it.readText() }.trim()
+            if (process.exitValue() != 0) {
+                throw ConnectException(writeOut.ifBlank { "curl failed while contacting Jenkins" })
+            }
+            val lines = writeOut.lines().filter { it.isNotBlank() }
+            val statusCode = lines.firstOrNull()?.toIntOrNull()
+                ?: throw IllegalStateException("curl did not return an HTTP status code")
+            val effectiveUrl = lines.drop(1).joinToString("\n").ifBlank { url }
+            return MerebJenkinsHttpResponse(
+                statusCode = statusCode,
+                body = Files.readString(bodyFile),
+                effectiveUrl = effectiveUrl,
+                headers = parseCurlHeaders(Files.readString(headersFile)),
+            )
+        } finally {
+            Files.deleteIfExists(headersFile)
+            Files.deleteIfExists(bodyFile)
+        }
+    }
+
+    companion object {
+        fun isAvailable(): Boolean {
+            return runCatching {
+                val process = ProcessBuilder("curl", "--version")
+                    .redirectErrorStream(true)
+                    .start()
+                if (!process.waitFor(2, TimeUnit.SECONDS)) {
+                    process.destroyForcibly()
+                    return false
+                }
+                process.exitValue() == 0
+            }.getOrDefault(false)
+        }
+
+        private fun escapeCurlConfigValue(value: String): String {
+            return value.replace("\\", "\\\\").replace("\"", "\\\"")
+        }
+
+        private fun parseCurlHeaders(rawHeaders: String): Map<String, List<String>> {
+            val result = linkedMapOf<String, MutableList<String>>()
+            var inFinalBlock = false
+            rawHeaders.lineSequence().forEach { line ->
+                if (line.startsWith("HTTP/")) {
+                    if (result.isNotEmpty()) {
+                        result.clear()
+                    }
+                    inFinalBlock = true
+                    return@forEach
+                }
+                if (!inFinalBlock) return@forEach
+                val trimmed = line.trim()
+                if (trimmed.isEmpty()) return@forEach
+                val separator = trimmed.indexOf(':')
+                if (separator <= 0) return@forEach
+                val name = trimmed.substring(0, separator).trim().lowercase()
+                val value = trimmed.substring(separator + 1).trim()
+                result.getOrPut(name) { mutableListOf() } += value
+            }
+            return result
+        }
+    }
+}
+
+class MerebJenkinsFallbackHttpTransport(
+    private val primary: MerebJenkinsHttpTransport,
+    private val fallback: MerebJenkinsHttpTransport,
+) : MerebJenkinsHttpTransport {
+    override fun get(url: String, headers: Map<String, String>): MerebJenkinsHttpResponse {
+        val primaryResponse = primary.get(url, headers)
+        if (!shouldRetryWithFallback(primaryResponse)) return primaryResponse
+        return runCatching { fallback.get(url, headers) }.getOrDefault(primaryResponse)
+    }
+
+    private fun shouldRetryWithFallback(response: MerebJenkinsHttpResponse): Boolean {
+        return responseLooksEdgeFiltered(response)
+    }
+}
+
 class MerebJenkinsJenkinsClient(
     private val baseUrl: String,
     private val username: String,
     private val token: String,
-    private val transport: MerebJenkinsHttpTransport = MerebJenkinsJdkHttpTransport(),
+    private val transport: MerebJenkinsHttpTransport = defaultTransport(),
 ) {
     private val normalizedBaseUrl = MerebJenkinsJenkinsStateService.normalizeBaseUrl(baseUrl)
     private val authorizationHeader = "Basic " + Base64.getEncoder().encodeToString("$username:$token".toByteArray(StandardCharsets.UTF_8))
@@ -549,13 +661,9 @@ class MerebJenkinsJenkinsClient(
         response: MerebJenkinsHttpResponse,
         requestUrl: String,
     ): MerebJenkinsApiProblem? {
-        val responseBody = response.body.lowercase()
-        val serverHeader = response.headers["server"]?.joinToString(" ").orEmpty().lowercase()
-        val isCloudflare = serverHeader.contains("cloudflare") ||
-            response.headers.containsKey("cf-ray") ||
-            responseBody.contains("cloudflare")
-        if (!isCloudflare) return null
+        if (!responseLooksEdgeFiltered(response)) return null
 
+        val responseBody = response.body.lowercase()
         val browserIntegrityBlocked = responseBody.contains("error code 1010") ||
             responseBody.contains("browser integrity") ||
             responseBody.contains("browser signature banned")
@@ -594,6 +702,15 @@ class MerebJenkinsJenkinsClient(
     companion object {
         private const val MAX_REDIRECTS = 5
         private const val SCRIPTED_CLIENT_USER_AGENT = "curl/8.7.1 MerebJenkinsHelper"
+
+        private fun defaultTransport(): MerebJenkinsHttpTransport {
+            val jdkTransport = MerebJenkinsJdkHttpTransport()
+            return if (MerebJenkinsCurlHttpTransport.isAvailable()) {
+                MerebJenkinsFallbackHttpTransport(jdkTransport, MerebJenkinsCurlHttpTransport())
+            } else {
+                jdkTransport
+            }
+        }
 
         fun encodeJobPath(jobPath: String): String = "/" + MerebJenkinsJenkinsStateService.normalizeJobPath(jobPath)
             .split('/')
@@ -674,6 +791,21 @@ class MerebJenkinsJenkinsClient(
             return value.trim().lowercase().replace(Regex("[^a-z0-9]"), "")
         }
     }
+}
+
+private fun responseLooksEdgeFiltered(response: MerebJenkinsHttpResponse): Boolean {
+    val responseBody = response.body.lowercase()
+    val serverHeader = response.headers["server"]?.joinToString(" ").orEmpty().lowercase()
+    val isCloudflare = serverHeader.contains("cloudflare") ||
+        response.headers.containsKey("cf-ray") ||
+        responseBody.contains("cloudflare")
+    if (!isCloudflare) return false
+    return response.statusCode == HttpURLConnection.HTTP_FORBIDDEN ||
+        response.statusCode == 429 ||
+        response.statusCode == 503 ||
+        responseBody.contains("error code 1010") ||
+        responseBody.contains("browser integrity") ||
+        responseBody.contains("browser signature banned")
 }
 
 internal fun MerebJenkinsApiResult<Map<String, Any?>>.mapToController(): MerebJenkinsApiResult<MerebJenkinsControllerInfo> {
