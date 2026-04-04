@@ -1,41 +1,89 @@
 # Deploying The IntelliJ Plugin
 
-This plugin is intended for private distribution inside Mereb.
+This plugin is delivered through a GitHub Pages custom plugin repository hosted from this repo.
 
-## Build The Artifact
+## One-Time Repository Setup
 
-Run the plugin build from `pipeline-configs/mereb-jenkins-schema-pluign`:
+Before the first release:
 
-```bash
-./gradlew clean buildPlugin
+1. Push this repo to GitHub.
+2. In GitHub, open `Settings -> Pages`.
+3. Set `Build and deployment` to `GitHub Actions`.
+4. Keep the repo public if you want the cheapest, simplest distribution path.
+
+The published repository URL will be:
+
+```text
+https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign/updatePlugins.xml
 ```
 
-The installable ZIP is written to `build/distributions/`.
+## Release Process
 
-## Versioning
+Every published plugin version is driven by a Git tag.
 
-- Keep the plugin version in `build.gradle.kts` aligned with the library release that introduces schema or validation changes.
-- The plugin fetches schema content from `https://github.com/leultewolde/mereb-jenkins/blob/main/docs/ci.schema.json` during the build.
-- If GitHub is unavailable, the build falls back to the checked-in snapshot at `schema-cache/ci.schema.json`.
-- When the schema changes upstream, rebuild and redistribute the plugin so editor validation matches pipeline runtime behavior.
+1. Update `version` in `build.gradle.kts`.
+2. Commit and push the version change.
+3. Create a matching tag in the format `vX.Y.Z`.
+4. Push the tag.
 
-## Internal Distribution
+Example:
 
-- Upload the generated ZIP to the internal artifact location your team already uses for developer tooling.
-- Announce the new version together with a short changelog and the supported IntelliJ build range.
+```bash
+git tag v0.1.3
+git push origin v0.1.3
+```
 
-## Installing In IntelliJ
+The GitHub Actions workflow at `.github/workflows/release-plugin.yml` will:
+
+1. validate that the tag matches `build.gradle.kts`
+2. run `./gradlew clean test buildPlugin generateCustomPluginRepository`
+3. generate `updatePlugins.xml`
+4. publish `updatePlugins.xml` and the built ZIP to GitHub Pages
+
+The published Pages artifact contains:
+
+- `updatePlugins.xml`
+- `plugins/mereb-jenkins-helper-<version>.zip`
+
+Only the current release is kept in the update feed.
+
+## Local Validation Before Tagging
+
+Run this from `pipeline-configs/mereb-jenkins-schema-pluign`:
+
+```bash
+./gradlew clean test buildPlugin generateCustomPluginRepository \
+  -PcustomPluginRepositoryBaseUrl=https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign
+```
+
+Check:
+
+- `build/distributions/mereb-jenkins-helper-<version>.zip` exists
+- `build/custom-plugin-repository/updatePlugins.xml` points at the same versioned ZIP
+- the generated XML contains the expected plugin id, version, and IntelliJ build range
+
+## End-User Installation
+
+Users install the plugin by adding the repository URL once in IntelliJ:
 
 1. Open IntelliJ IDEA.
 2. Go to `Settings` / `Preferences` -> `Plugins`.
 3. Click the gear icon.
-4. Choose `Install Plugin from Disk...`.
-5. Select the ZIP from `build/distributions/`.
-6. Restart IntelliJ when prompted.
+4. Choose `Manage Plugin Repositories...`.
+5. Add:
+   `https://<github-user-or-org>.github.io/mereb-jenkins-schema-pluign/updatePlugins.xml`
+6. Search for `Mereb Jenkins Helper` in the Plugins UI and install it.
 
-## Rolling Out Updates
+After that, IntelliJ checks the same repository URL for updates.
 
-- Rebuild the ZIP whenever config schema behavior changes.
-- Ask users to replace the installed plugin with the newer ZIP using the same `Install Plugin from Disk...` flow.
-- Keep the deployment note with each ZIP so users know which `mereb-jenkins` release it matches.
+## Signing And Trust Warning
+
+This first version is intentionally unsigned to keep setup and hosting costs low.
+
+Because of that, IntelliJ may show a trust warning during install or update. That is expected with the current rollout model.
+
+## Notes
+
+- The plugin fetches schema content from `https://github.com/leultewolde/mereb-jenkins/blob/main/docs/ci.schema.json` during the build.
+- If GitHub is unavailable, the build falls back to `schema-cache/ci.schema.json`.
 - The plugin relies on IntelliJ's YAML support for syntax colors, indentation, and reformatting, and adds Mereb-specific icon, schema, and semantic inspection layers on top.
