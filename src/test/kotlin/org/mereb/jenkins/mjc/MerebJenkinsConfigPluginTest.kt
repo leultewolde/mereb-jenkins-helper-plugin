@@ -34,7 +34,11 @@ class MerebJenkinsConfigPluginTest {
     @Test
     fun `schema provider exposes bundled schema resource`() {
         val provider = MerebJenkinsSchemaFileProvider()
-        assertNotNull(provider.getSchemaResource())
+        val resource = provider.getSchemaResource()
+        assertNotNull(resource)
+        val body = resource.readText()
+        assertTrue(body.contains("\"generatedValues\""))
+        assertTrue(body.contains("\"outboxWorker\""))
     }
 
     @Test
@@ -197,6 +201,7 @@ class MerebJenkinsConfigPluginTest {
         assertTrue("service recipe" in labels)
         assertTrue("image block" in labels)
         assertTrue("release autoTag" in labels)
+        assertTrue("generated outbox deploy env" in labels)
     }
 
     @Test
@@ -253,6 +258,49 @@ class MerebJenkinsConfigPluginTest {
 
         assertTrue(suggestions.any { it.lookup == "repository" && it.insertText == "repository: " })
         assertTrue(suggestions.any { it.lookup == "dockerfile" })
+    }
+
+    @Test
+    fun `completion model suggests generated values block for deploy environments`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev_outbox:
+                        val
+                """.trimIndent(),
+                parentPathString = "deploy.dev_outbox",
+                linePrefix = "    val",
+                keyContext = true,
+                valueContext = false,
+            )
+        )
+
+        assertTrue(suggestions.any { it.lookup == "generatedValues" && it.insertText == "generatedValues:\n  " })
+        assertTrue(suggestions.any { it.lookup == "valuesFiles" })
+    }
+
+    @Test
+    fun `completion model suggests generated values profiles`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev_outbox:
+                        generatedValues:
+                          profile: o
+                """.trimIndent(),
+                pathString = "deploy.dev_outbox.generatedValues.profile",
+                linePrefix = "      profile: o",
+                valueContext = true,
+            )
+        )
+
+        assertTrue(suggestions.any { it.lookup == "outboxWorker" && it.typeText == "generated values profile" })
     }
 
     @Test

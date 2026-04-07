@@ -24,6 +24,7 @@ object MerebJenkinsCompletionModel {
     private val bumpValues = listOf("patch", "minor", "major")
     private val presetValues = listOf("node", "pnpm", "docker")
     private val commonEnvironmentNames = listOf("dev", "stg", "prd")
+    private val generatedValueProfiles = listOf("outboxWorker")
 
     fun suggestions(
         rawText: String,
@@ -101,13 +102,19 @@ object MerebJenkinsCompletionModel {
                 MerebJenkinsCompletionItem(value, value, "terraform env")
             })
         }
+
+        if (normalizedPath.endsWith(".generatedValues.profile") || trimmedLine.startsWith("profile:")) {
+            addAll(generatedValueProfiles.map { value ->
+                MerebJenkinsCompletionItem(value, value, "generated values profile")
+            })
+        }
     }
 
     private fun keySuggestions(
         cfg: Map<String, Any?>,
         parentPath: String,
-    ): List<MerebJenkinsCompletionItem> = when (parentPath) {
-        "" -> listOf(
+    ): List<MerebJenkinsCompletionItem> = when {
+        parentPath == "" -> listOf(
             scalarKey("version"),
             scalarKey("recipe"),
             scalarKey("preset"),
@@ -119,15 +126,34 @@ object MerebJenkinsCompletionModel {
             blockKey("microfrontend"),
             blockKey("terraform"),
         )
-        "delivery" -> listOf(scalarKey("mode"))
-        "image" -> listOf(scalarKey("repository"), scalarKey("context"), scalarKey("dockerfile"))
-        "release" -> listOf(blockKey("autoTag"))
-        "release.autoTag" -> listOf(scalarKey("enabled"), scalarKey("when"), scalarKey("bump"))
-        "deploy" -> listOf(sequenceKey("order")) + (deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
-        "microfrontend" -> listOf(scalarKey("name"), scalarKey("packageName"), sequenceKey("order"), blockKey("environments"))
-        "microfrontend.environments" -> (microfrontendEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
-        "terraform" -> listOf(scalarKey("path"), sequenceKey("order"), blockKey("environments"))
-        "terraform.environments" -> (terraformEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        parentPath == "delivery" -> listOf(scalarKey("mode"))
+        parentPath == "image" -> listOf(scalarKey("repository"), scalarKey("context"), scalarKey("dockerfile"))
+        parentPath == "release" -> listOf(blockKey("autoTag"))
+        parentPath == "release.autoTag" -> listOf(scalarKey("enabled"), scalarKey("when"), scalarKey("bump"))
+        parentPath == "deploy" -> listOf(sequenceKey("order")) + (deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        inDeployEnvironment(parentPath) -> listOf(
+            scalarKey("release"),
+            scalarKey("namespace"),
+            scalarKey("chart"),
+            scalarKey("repo"),
+            sequenceKey("valuesFiles"),
+            blockKey("generatedValues"),
+            blockKey("smoke"),
+            blockKey("set"),
+            blockKey("setString"),
+            blockKey("setFile"),
+            scalarKey("timeout"),
+            scalarKey("rolloutTimeout"),
+            scalarKey("when"),
+        )
+        parentPath.endsWith(".generatedValues") -> listOf(
+            scalarKey("profile"),
+            blockKey("overlay"),
+        )
+        parentPath == "microfrontend" -> listOf(scalarKey("name"), scalarKey("packageName"), sequenceKey("order"), blockKey("environments"))
+        parentPath == "microfrontend.environments" -> (microfrontendEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        parentPath == "terraform" -> listOf(scalarKey("path"), sequenceKey("order"), blockKey("environments"))
+        parentPath == "terraform.environments" -> (terraformEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
         else -> emptyList()
     }
 
@@ -170,6 +196,10 @@ object MerebJenkinsCompletionModel {
     private fun deployEnvironmentNames(cfg: Map<String, Any?>): List<String> {
         val deploy = (cfg["deploy"] as? Map<*, *>)?.normalizeMap().orEmpty()
         return deploy.keys.filter { it != "order" }
+    }
+
+    private fun inDeployEnvironment(parentPath: String): Boolean {
+        return parentPath.startsWith("deploy.") && parentPath.count { it == '.' } == 1
     }
 
     private fun microfrontendEnvironmentNames(cfg: Map<String, Any?>): List<String> {

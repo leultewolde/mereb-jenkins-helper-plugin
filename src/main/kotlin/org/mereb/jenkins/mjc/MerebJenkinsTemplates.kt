@@ -178,6 +178,21 @@ object MerebJenkinsTemplates {
               namespace: apps-dev
               chart: app-chart
         """.trimIndent(),
+        "generated outbox deploy env" to """
+            dev_outbox:
+              namespace: apps-dev
+              chart: app-chart
+              valuesFiles:
+                - .ci/values-dev.yaml
+              generatedValues:
+                profile: outboxWorker
+                overlay:
+                  deploymentStrategy:
+                    type: RollingUpdate
+                    rollingUpdate:
+                      maxSurge: 0
+                      maxUnavailable: 1
+        """.trimIndent(),
         "microfrontend environment" to """
             dev:
               bucket: cdn-dev
@@ -192,4 +207,3 @@ object MerebJenkinsTemplates {
         """.trimIndent(),
     )
 }
-

@@ -14,14 +14,16 @@ plugins {
 }
 
 group = "org.mereb.jenkins"
-version = "0.2.4"
+version = "0.2.5"
 
 val pluginSinceBuild = "242"
 val pluginUntilBuild = "261.*"
 val pluginXmlFile = layout.projectDirectory.file("src/main/resources/META-INF/plugin.xml")
+val localWorkspaceSchemaFile = projectDir.toPath().resolve("../mereb-jenkins/docs/ci.schema.json").normalize().toFile()
 
 val schemaBlobUrl = providers.gradleProperty("merebJenkinsSchemaUrl")
     .orElse("https://github.com/leultewolde/mereb-jenkins/blob/main/docs/ci.schema.json")
+val schemaFileOverride = providers.gradleProperty("merebJenkinsSchemaFile")
 val generatedSchemaDir = layout.buildDirectory.dir("generated/remote-schema")
 val fallbackSchemaFile = layout.projectDirectory.file("schema-cache/ci.schema.json")
 val releaseTag = providers.gradleProperty("releaseTag")
@@ -134,12 +136,28 @@ intellijPlatform {
 tasks {
     val syncRemoteSchema by registering {
         inputs.property("schemaBlobUrl", schemaBlobUrl)
+        inputs.property("schemaFileOverride", schemaFileOverride.orNull ?: "")
+        inputs.property("localWorkspaceSchemaFile", localWorkspaceSchemaFile.path)
         inputs.file(fallbackSchemaFile)
         outputs.file(generatedSchemaDir.map { it.file("schemas/ci.schema.json") })
 
         doLast {
             val target = generatedSchemaDir.get().file("schemas/ci.schema.json").asFile
             target.parentFile.mkdirs()
+
+            val localSources = listOfNotNull(
+                schemaFileOverride.orNull?.trim()?.takeIf { it.isNotBlank() }?.let { file(it) },
+                localWorkspaceSchemaFile.takeIf { it.exists() }
+            )
+
+            for (source in localSources) {
+                if (!source.exists()) {
+                    continue
+                }
+                source.copyTo(target, overwrite = true)
+                logger.lifecycle("Using local Mereb Jenkins schema from ${source.path}")
+                return@doLast
+            }
 
             val sourceUrl = schemaBlobUrl.get()
             val candidates = linkedSetOf(sourceUrl, rawGitHubUrl(sourceUrl))
