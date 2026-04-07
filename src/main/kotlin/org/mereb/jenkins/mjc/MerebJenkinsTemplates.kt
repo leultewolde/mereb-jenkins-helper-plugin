@@ -193,6 +193,28 @@ object MerebJenkinsTemplates {
                       maxSurge: 0
                       maxUnavailable: 1
         """.trimIndent(),
+        "generated api service deploy env" to """
+            dev:
+              namespace: apps-dev
+              chart: app-chart
+              valuesFiles:
+                - .ci/values-dev.yaml
+              generatedBaseValues:
+                profile: apiService
+                inputs:
+                  serviceName: svc-feed
+                  containerPort: 4002
+                  routePrefix: /feed
+                  configMapName: svc-feed-dev-config
+                  secretName: svc-feed-dev-secrets
+                  tlsSecretName: feed-dev-tls
+                  secretTemplates:
+                    DATABASE_URL: FEED_DATABASE_URL
+                    SPLUNK_HEC_TOKEN: SPLUNK_HEC_TOKEN
+                  extraEnv:
+                    - name: OIDC_ISSUER
+                      fromPlatformIdentityConfigKey: OIDC_ISSUER
+        """.trimIndent(),
         "microfrontend environment" to """
             dev:
               bucket: cdn-dev

@@ -38,6 +38,8 @@ class MerebJenkinsConfigPluginTest {
         assertNotNull(resource)
         val body = resource.readText()
         assertTrue(body.contains("\"generatedValues\""))
+        assertTrue(body.contains("\"generatedBaseValues\""))
+        assertTrue(body.contains("\"apiService\""))
         assertTrue(body.contains("\"outboxWorker\""))
     }
 
@@ -202,6 +204,7 @@ class MerebJenkinsConfigPluginTest {
         assertTrue("image block" in labels)
         assertTrue("release autoTag" in labels)
         assertTrue("generated outbox deploy env" in labels)
+        assertTrue("generated api service deploy env" in labels)
     }
 
     @Test
@@ -279,6 +282,7 @@ class MerebJenkinsConfigPluginTest {
         )
 
         assertTrue(suggestions.any { it.lookup == "generatedValues" && it.insertText == "generatedValues:\n  " })
+        assertTrue(suggestions.any { it.lookup == "generatedBaseValues" && it.insertText == "generatedBaseValues:\n  " })
         assertTrue(suggestions.any { it.lookup == "valuesFiles" })
     }
 
@@ -301,6 +305,76 @@ class MerebJenkinsConfigPluginTest {
         )
 
         assertTrue(suggestions.any { it.lookup == "outboxWorker" && it.typeText == "generated values profile" })
+    }
+
+    @Test
+    fun `completion model suggests generated base values profiles`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev:
+                        generatedBaseValues:
+                          profile: a
+                """.trimIndent(),
+                pathString = "deploy.dev.generatedBaseValues.profile",
+                linePrefix = "      profile: a",
+                valueContext = true,
+            )
+        )
+
+        assertTrue(suggestions.any { it.lookup == "apiService" && it.typeText == "generated base values profile" })
+    }
+
+    @Test
+    fun `completion model suggests generated base values inputs and extra env keys`() {
+        val inputSuggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev:
+                        generatedBaseValues:
+                          profile: apiService
+                          inputs:
+                            ser
+                """.trimIndent(),
+                parentPathString = "deploy.dev.generatedBaseValues.inputs",
+                linePrefix = "        ser",
+                keyContext = true,
+                valueContext = false,
+            )
+        )
+
+        val extraEnvSuggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev:
+                        generatedBaseValues:
+                          profile: apiService
+                          inputs:
+                            extraEnv:
+                              - na
+                """.trimIndent(),
+                parentPathString = "deploy.dev.generatedBaseValues.inputs.extraEnv[0]",
+                linePrefix = "            na",
+                keyContext = true,
+                valueContext = false,
+            )
+        )
+
+        assertTrue(inputSuggestions.any { it.lookup == "serviceName" })
+        assertTrue(inputSuggestions.any { it.lookup == "secretTemplates" })
+        assertTrue(inputSuggestions.any { it.lookup == "extraEnv" })
+        assertTrue(extraEnvSuggestions.any { it.lookup == "name" })
+        assertTrue(extraEnvSuggestions.any { it.lookup == "fromPlatformIdentityConfigKey" })
+        assertTrue(extraEnvSuggestions.any { it.lookup == "fromPlatformIdentitySecretKey" })
     }
 
     @Test

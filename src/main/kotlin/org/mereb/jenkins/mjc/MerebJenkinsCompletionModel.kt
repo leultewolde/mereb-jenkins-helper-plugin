@@ -25,6 +25,7 @@ object MerebJenkinsCompletionModel {
     private val presetValues = listOf("node", "pnpm", "docker")
     private val commonEnvironmentNames = listOf("dev", "stg", "prd")
     private val generatedValueProfiles = listOf("outboxWorker")
+    private val generatedBaseValueProfiles = listOf("apiService")
 
     fun suggestions(
         rawText: String,
@@ -103,9 +104,15 @@ object MerebJenkinsCompletionModel {
             })
         }
 
-        if (normalizedPath.endsWith(".generatedValues.profile") || trimmedLine.startsWith("profile:")) {
+        if (normalizedPath.endsWith(".generatedValues.profile")) {
             addAll(generatedValueProfiles.map { value ->
                 MerebJenkinsCompletionItem(value, value, "generated values profile")
+            })
+        }
+
+        if (normalizedPath.endsWith(".generatedBaseValues.profile")) {
+            addAll(generatedBaseValueProfiles.map { value ->
+                MerebJenkinsCompletionItem(value, value, "generated base values profile")
             })
         }
     }
@@ -137,6 +144,7 @@ object MerebJenkinsCompletionModel {
             scalarKey("chart"),
             scalarKey("repo"),
             sequenceKey("valuesFiles"),
+            blockKey("generatedBaseValues"),
             blockKey("generatedValues"),
             blockKey("smoke"),
             blockKey("set"),
@@ -145,6 +153,27 @@ object MerebJenkinsCompletionModel {
             scalarKey("timeout"),
             scalarKey("rolloutTimeout"),
             scalarKey("when"),
+        )
+        parentPath.endsWith(".generatedBaseValues") -> listOf(
+            scalarKey("profile"),
+            blockKey("inputs"),
+        )
+        parentPath.endsWith(".generatedBaseValues.inputs") -> listOf(
+            scalarKey("serviceName"),
+            scalarKey("containerPort"),
+            scalarKey("routePrefix"),
+            scalarKey("configMapName"),
+            scalarKey("secretName"),
+            scalarKey("tlsSecretName"),
+            blockKey("secretTemplates"),
+            sequenceKey("extraEnv"),
+        )
+        inGeneratedBaseExtraEnvItem(parentPath) -> listOf(
+            scalarKey("name"),
+            scalarKey("value"),
+            scalarKey("fromPlatformIdentityConfigKey"),
+            scalarKey("fromPlatformIdentitySecretKey"),
+            scalarKey("optional"),
         )
         parentPath.endsWith(".generatedValues") -> listOf(
             scalarKey("profile"),
@@ -210,5 +239,10 @@ object MerebJenkinsCompletionModel {
     private fun terraformEnvironmentNames(cfg: Map<String, Any?>): List<String> {
         val terraform = (cfg["terraform"] as? Map<*, *>)?.normalizeMap().orEmpty()
         return ((terraform["environments"] as? Map<*, *>)?.normalizeMap().orEmpty()).keys.toList()
+    }
+
+    private fun inGeneratedBaseExtraEnvItem(parentPath: String): Boolean {
+        return parentPath.endsWith(".generatedBaseValues.inputs.extraEnv") ||
+            parentPath.matches(Regex(".*\\.generatedBaseValues\\.inputs\\.extraEnv\\[\\d+\\]"))
     }
 }
