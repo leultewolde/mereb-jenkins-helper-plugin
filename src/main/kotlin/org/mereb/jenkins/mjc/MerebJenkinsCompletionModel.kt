@@ -19,6 +19,7 @@ data class MerebJenkinsCompletionRequest(
 )
 
 object MerebJenkinsCompletionModel {
+    private val reservedDeployKeys = setOf("order", "defaults", "generatedBaseDefaults")
     private val recipeValues = listOf("build", "package", "image", "service", "microfrontend", "terraform")
     private val deliveryModes = listOf("staged", "custom")
     private val bumpValues = listOf("patch", "minor", "major")
@@ -110,9 +111,19 @@ object MerebJenkinsCompletionModel {
             })
         }
 
-        if (normalizedPath.endsWith(".generatedBaseValues.profile")) {
+        if (normalizedPath.endsWith(".generatedBaseValues.profile") || normalizedPath.endsWith(".generatedBaseDefaults.profile")) {
             addAll(generatedBaseValueProfiles.map { value ->
                 MerebJenkinsCompletionItem(value, value, "generated base values profile")
+            })
+        }
+
+        if (normalizedPath == "deploy.smoke" || normalizedPath.endsWith(".smoke") || trimmedLine.startsWith("smoke:")) {
+            add(MerebJenkinsCompletionItem("false", "false", "disable inherited smoke"))
+        }
+
+        if (normalizedPath.endsWith(".extends") || trimmedLine.startsWith("extends:")) {
+            addAll(deployEnvironmentNames(cfg).map { value ->
+                MerebJenkinsCompletionItem(value, value, "deploy env")
             })
         }
     }
@@ -137,8 +148,23 @@ object MerebJenkinsCompletionModel {
         parentPath == "image" -> listOf(scalarKey("repository"), scalarKey("context"), scalarKey("dockerfile"))
         parentPath == "release" -> listOf(blockKey("autoTag"))
         parentPath == "release.autoTag" -> listOf(scalarKey("enabled"), scalarKey("when"), scalarKey("bump"))
-        parentPath == "deploy" -> listOf(sequenceKey("order")) + (deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        parentPath == "deploy" -> listOf(sequenceKey("order"), blockKey("defaults"), blockKey("generatedBaseDefaults")) +
+            (deployEnvironmentNames(cfg) + commonEnvironmentNames).distinct().map { envKey(it) }
+        parentPath == "deploy.defaults" -> listOf(
+            scalarKey("chart"),
+            scalarKey("repo"),
+            scalarKey("repoCredentialId"),
+            scalarKey("repoCredential"),
+            blockKey("repoCredentials"),
+            scalarKey("repoUsername"),
+            scalarKey("repoPassword"),
+            scalarKey("wait"),
+            scalarKey("atomic"),
+            scalarKey("timeout"),
+            scalarKey("rolloutTimeout"),
+        )
         inDeployEnvironment(parentPath) -> listOf(
+            scalarKey("extends"),
             scalarKey("release"),
             scalarKey("namespace"),
             scalarKey("chart"),
@@ -154,9 +180,23 @@ object MerebJenkinsCompletionModel {
             scalarKey("rolloutTimeout"),
             scalarKey("when"),
         )
+        parentPath == "deploy.generatedBaseDefaults" -> listOf(
+            scalarKey("profile"),
+            blockKey("inputs"),
+        )
         parentPath.endsWith(".generatedBaseValues") -> listOf(
             scalarKey("profile"),
             blockKey("inputs"),
+        )
+        parentPath == "deploy.generatedBaseDefaults.inputs" -> listOf(
+            scalarKey("serviceName"),
+            scalarKey("containerPort"),
+            scalarKey("routePrefix"),
+            scalarKey("configMapName"),
+            scalarKey("secretName"),
+            scalarKey("tlsSecretName"),
+            blockKey("secretTemplates"),
+            sequenceKey("extraEnv"),
         )
         parentPath.endsWith(".generatedBaseValues.inputs") -> listOf(
             scalarKey("serviceName"),
@@ -224,11 +264,15 @@ object MerebJenkinsCompletionModel {
 
     private fun deployEnvironmentNames(cfg: Map<String, Any?>): List<String> {
         val deploy = (cfg["deploy"] as? Map<*, *>)?.normalizeMap().orEmpty()
-        return deploy.keys.filter { it != "order" }
+        return deploy.keys.filter { it !in reservedDeployKeys }
     }
 
     private fun inDeployEnvironment(parentPath: String): Boolean {
-        return parentPath.startsWith("deploy.") && parentPath.count { it == '.' } == 1
+        if (!parentPath.startsWith("deploy.") || parentPath.count { it == '.' } != 1) {
+            return false
+        }
+        val envName = parentPath.removePrefix("deploy.")
+        return envName !in reservedDeployKeys
     }
 
     private fun microfrontendEnvironmentNames(cfg: Map<String, Any?>): List<String> {
@@ -243,6 +287,8 @@ object MerebJenkinsCompletionModel {
 
     private fun inGeneratedBaseExtraEnvItem(parentPath: String): Boolean {
         return parentPath.endsWith(".generatedBaseValues.inputs.extraEnv") ||
+            parentPath.endsWith(".generatedBaseDefaults.inputs.extraEnv") ||
             parentPath.matches(Regex(".*\\.generatedBaseValues\\.inputs\\.extraEnv\\[\\d+\\]"))
+            || parentPath.matches(Regex(".*\\.generatedBaseDefaults\\.inputs\\.extraEnv\\[\\d+\\]"))
     }
 }

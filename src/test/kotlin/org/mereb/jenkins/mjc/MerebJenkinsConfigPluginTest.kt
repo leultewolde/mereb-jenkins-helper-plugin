@@ -39,6 +39,9 @@ class MerebJenkinsConfigPluginTest {
         val body = resource.readText()
         assertTrue(body.contains("\"generatedValues\""))
         assertTrue(body.contains("\"generatedBaseValues\""))
+        assertTrue(body.contains("\"generatedBaseDefaults\""))
+        assertTrue(body.contains("\"defaults\""))
+        assertTrue(body.contains("\"extends\""))
         assertTrue(body.contains("\"apiService\""))
         assertTrue(body.contains("\"outboxWorker\""))
     }
@@ -205,6 +208,7 @@ class MerebJenkinsConfigPluginTest {
         assertTrue("release autoTag" in labels)
         assertTrue("generated outbox deploy env" in labels)
         assertTrue("generated api service deploy env" in labels)
+        assertTrue("deploy defaults with inherited outbox env" in labels)
     }
 
     @Test
@@ -287,6 +291,27 @@ class MerebJenkinsConfigPluginTest {
     }
 
     @Test
+    fun `completion model suggests deploy defaults and generated base defaults blocks`() {
+        val suggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      def
+                """.trimIndent(),
+                parentPathString = "deploy",
+                linePrefix = "  def",
+                keyContext = true,
+                valueContext = false,
+            )
+        )
+
+        assertTrue(suggestions.any { it.lookup == "defaults" && it.insertText == "defaults:\n  " })
+        assertTrue(suggestions.any { it.lookup == "generatedBaseDefaults" && it.insertText == "generatedBaseDefaults:\n  " })
+    }
+
+    @Test
     fun `completion model suggests generated values profiles`() {
         val suggestions = MerebJenkinsCompletionModel.suggestions(
             MerebJenkinsCompletionRequest(
@@ -326,6 +351,45 @@ class MerebJenkinsConfigPluginTest {
         )
 
         assertTrue(suggestions.any { it.lookup == "apiService" && it.typeText == "generated base values profile" })
+    }
+
+    @Test
+    fun `completion model suggests generated base defaults profile and input keys`() {
+        val profileSuggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      generatedBaseDefaults:
+                        profile: a
+                """.trimIndent(),
+                pathString = "deploy.generatedBaseDefaults.profile",
+                linePrefix = "    profile: a",
+                valueContext = true,
+            )
+        )
+        val inputSuggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      generatedBaseDefaults:
+                        profile: apiService
+                        inputs:
+                          sec
+                """.trimIndent(),
+                parentPathString = "deploy.generatedBaseDefaults.inputs",
+                linePrefix = "      sec",
+                keyContext = true,
+                valueContext = false,
+            )
+        )
+
+        assertTrue(profileSuggestions.any { it.lookup == "apiService" })
+        assertTrue(inputSuggestions.any { it.lookup == "secretTemplates" })
+        assertTrue(inputSuggestions.any { it.lookup == "extraEnv" })
     }
 
     @Test
@@ -375,6 +439,43 @@ class MerebJenkinsConfigPluginTest {
         assertTrue(extraEnvSuggestions.any { it.lookup == "name" })
         assertTrue(extraEnvSuggestions.any { it.lookup == "fromPlatformIdentityConfigKey" })
         assertTrue(extraEnvSuggestions.any { it.lookup == "fromPlatformIdentitySecretKey" })
+    }
+
+    @Test
+    fun `completion model suggests extends targets and smoke false`() {
+        val extendSuggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev:
+                        namespace: apps-dev
+                      dev_outbox:
+                        extends: d
+                """.trimIndent(),
+                pathString = "deploy.dev_outbox.extends",
+                linePrefix = "    extends: d",
+                valueContext = true,
+            )
+        )
+        val smokeSuggestions = MerebJenkinsCompletionModel.suggestions(
+            MerebJenkinsCompletionRequest(
+                rawText = """
+                    version: 1
+                    recipe: service
+                    deploy:
+                      dev_outbox:
+                        smoke: f
+                """.trimIndent(),
+                pathString = "deploy.dev_outbox.smoke",
+                linePrefix = "    smoke: f",
+                valueContext = true,
+            )
+        )
+
+        assertTrue(extendSuggestions.any { it.lookup == "dev" && it.typeText == "deploy env" })
+        assertTrue(smokeSuggestions.any { it.lookup == "false" && it.typeText == "disable inherited smoke" })
     }
 
     @Test

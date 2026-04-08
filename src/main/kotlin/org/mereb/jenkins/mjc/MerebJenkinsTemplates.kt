@@ -193,6 +193,43 @@ object MerebJenkinsTemplates {
                       maxSurge: 0
                       maxUnavailable: 1
         """.trimIndent(),
+        "deploy defaults with inherited outbox env" to """
+            deploy:
+              defaults:
+                chart: app-chart
+                repo: https://charts.leultewolde.com
+                repoCredentialId: helm-chart-creds
+              generatedBaseDefaults:
+                profile: apiService
+                inputs:
+                  serviceName: svc-feed
+                  containerPort: 4002
+                  routePrefix: /feed
+                  secretTemplates:
+                    DATABASE_URL: FEED_DATABASE_URL
+                    SPLUNK_HEC_TOKEN: SPLUNK_HEC_TOKEN
+                  extraEnv:
+                    - name: OIDC_ISSUER
+                      fromPlatformIdentityConfigKey: OIDC_ISSUER
+              dev:
+                release: svc-feed-dev
+                namespace: apps-dev
+                valuesFiles:
+                  - .ci/values-dev.yaml
+                generatedBaseValues:
+                  inputs:
+                    configMapName: svc-feed-dev-config
+                    secretName: svc-feed-dev-secrets
+                    tlsSecretName: feed-dev-tls
+                smoke:
+                  url: https://api-dev.mereb.app/feed/healthz
+              dev_outbox:
+                extends: dev
+                smoke: false
+                release: svc-feed-dev-outbox
+                generatedValues:
+                  profile: outboxWorker
+            """.trimIndent(),
         "generated api service deploy env" to """
             dev:
               namespace: apps-dev
@@ -200,20 +237,10 @@ object MerebJenkinsTemplates {
               valuesFiles:
                 - .ci/values-dev.yaml
               generatedBaseValues:
-                profile: apiService
                 inputs:
-                  serviceName: svc-feed
-                  containerPort: 4002
-                  routePrefix: /feed
                   configMapName: svc-feed-dev-config
                   secretName: svc-feed-dev-secrets
                   tlsSecretName: feed-dev-tls
-                  secretTemplates:
-                    DATABASE_URL: FEED_DATABASE_URL
-                    SPLUNK_HEC_TOKEN: SPLUNK_HEC_TOKEN
-                  extraEnv:
-                    - name: OIDC_ISSUER
-                      fromPlatformIdentityConfigKey: OIDC_ISSUER
         """.trimIndent(),
         "microfrontend environment" to """
             dev:

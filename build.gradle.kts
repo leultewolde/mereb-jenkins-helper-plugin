@@ -14,7 +14,7 @@ plugins {
 }
 
 group = "org.mereb.jenkins"
-version = "0.2.6"
+version = "0.2.7"
 
 val pluginSinceBuild = "242"
 val pluginUntilBuild = "261.*"
