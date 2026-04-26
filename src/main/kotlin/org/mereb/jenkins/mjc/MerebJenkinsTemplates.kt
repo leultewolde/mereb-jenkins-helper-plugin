@@ -178,6 +178,15 @@ object MerebJenkinsTemplates {
               namespace: apps-dev
               chart: app-chart
         """.trimIndent(),
+        "post deploy stage" to """
+            postDeployStages:
+              - name: Publish subgraph
+                credentials:
+                  - type: string
+                    id: graphos-rover-api-key
+                    env: ROVER_APOLLO_KEY
+                sh: ./scripts/graphos/publish-subgraph.sh
+        """.trimIndent(),
         "generated outbox deploy env" to """
             dev_outbox:
               namespace: apps-dev

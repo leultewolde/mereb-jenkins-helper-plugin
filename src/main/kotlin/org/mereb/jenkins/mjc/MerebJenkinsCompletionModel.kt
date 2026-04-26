@@ -173,6 +173,7 @@ object MerebJenkinsCompletionModel {
             blockKey("generatedBaseValues"),
             blockKey("generatedValues"),
             blockKey("smoke"),
+            sequenceKey("postDeployStages"),
             blockKey("set"),
             blockKey("setString"),
             blockKey("setFile"),
@@ -288,7 +289,7 @@ object MerebJenkinsCompletionModel {
     private fun inGeneratedBaseExtraEnvItem(parentPath: String): Boolean {
         return parentPath.endsWith(".generatedBaseValues.inputs.extraEnv") ||
             parentPath.endsWith(".generatedBaseDefaults.inputs.extraEnv") ||
-            parentPath.matches(Regex(".*\\.generatedBaseValues\\.inputs\\.extraEnv\\[\\d+\\]"))
-            || parentPath.matches(Regex(".*\\.generatedBaseDefaults\\.inputs\\.extraEnv\\[\\d+\\]"))
+            parentPath.matches(Regex(".*\\.generatedBaseValues\\.inputs\\.extraEnv\\[\\d+]"))
+            || parentPath.matches(Regex(".*\\.generatedBaseDefaults\\.inputs\\.extraEnv\\[\\d+]"))
     }
 }

@@ -4,6 +4,7 @@ import kotlin.math.min
 import org.yaml.snakeyaml.Yaml
 
 class MerebJenkinsConfigEngine {
+    private val reservedDeployKeys = setOf("order", "defaults", "generatedBaseDefaults")
     private val supportedRecipes = setOf("build", "package", "image", "service", "microfrontend", "terraform")
 
     fun analyze(rawText: String, configFilePath: String? = null): MerebJenkinsAnalysisResult {
@@ -126,7 +127,7 @@ class MerebJenkinsConfigEngine {
         if (deploy.isEmpty()) return
 
         val deliveryMode = deliveryMode(cfg)
-        val envs = deploy.filterKeys { it != "order" }
+        val envs = deploy.filterKeys { it !in reservedDeployKeys }
         val order = deploy["order"] as? List<*>
         if (order != null) {
             val validNames = envs.keys.toList()
@@ -463,13 +464,14 @@ class MerebJenkinsConfigEngine {
             sections = buildSectionStates(cfg, resolvedRecipe),
             relations = relations,
             safeFixes = safeFixes,
-            flowSteps = buildFlowSteps(resolvedRecipe, deployOrder, microfrontendOrder, terraformOrder, hasReleaseAutomation(cfg)),
+            flowSteps = buildFlowSteps(cfg, resolvedRecipe, deployOrder, microfrontendOrder, terraformOrder, hasReleaseAutomation(cfg)),
             errorCount = findings.count { it.severity == MerebJenkinsSeverity.ERROR },
             warningCount = findings.count { it.severity == MerebJenkinsSeverity.WARNING },
         )
     }
 
     private fun buildFlowSteps(
+        cfg: Map<String, Any?>,
         recipe: String,
         deployOrder: List<String>,
         microfrontendOrder: List<String>,
@@ -480,8 +482,18 @@ class MerebJenkinsConfigEngine {
         when (recipe) {
             "service" -> {
                 steps += MerebJenkinsFlowStep("Build Image", MerebJenkinsPath.root().key("image"))
-                steps += deployOrder.ifEmpty { listOf("Deploy") }.map {
-                    MerebJenkinsFlowStep("Deploy $it", MerebJenkinsPath.root().key("deploy").key(it))
+                steps += deployOrder.ifEmpty { listOf("Deploy") }.flatMap { envName ->
+                    buildList {
+                        add(MerebJenkinsFlowStep("Deploy $envName", MerebJenkinsPath.root().key("deploy").key(envName)))
+                        postDeployStageNames(cfg, envName).forEachIndexed { index, stageName ->
+                            add(
+                                MerebJenkinsFlowStep(
+                                    "Post-Deploy $envName: $stageName",
+                                    MerebJenkinsPath.root().key("deploy").key(envName).key("postDeployStages").index(index)
+                                )
+                            )
+                        }
+                    }
                 }
             }
             "image" -> steps += MerebJenkinsFlowStep("Build Image", MerebJenkinsPath.root().key("image"))
@@ -691,7 +703,7 @@ class MerebJenkinsConfigEngine {
                 else -> emptyMap()
             }
         }
-        return deploy.keys.filter { it != "order" }
+        return deploy.keys.filter { it !in reservedDeployKeys }
     }
 
     private fun microfrontendEnvironmentNames(cfg: Map<String, Any?>): List<String> {
@@ -819,8 +831,8 @@ class MerebJenkinsConfigEngine {
     }
 
     private fun hasDeployEnvironments(cfg: Map<String, Any?>): Boolean {
-        val deploy = cfg["deploy"] as? Map<*, *> ?: return false
-        return deploy.keys.any { it?.asString() != "order" }
+        val deploy = (cfg["deploy"] as? Map<*, *>)?.normalizeMap() ?: return false
+        return deploy.keys.any { it !in reservedDeployKeys }
     }
 
     private fun hasTerraformEnvironments(cfg: Map<String, Any?>): Boolean {
@@ -851,9 +863,19 @@ class MerebJenkinsConfigEngine {
     }
 
     private fun deployOrder(cfg: Map<String, Any?>): List<String> {
-        val deploy = cfg["deploy"] as? Map<*, *> ?: return emptyList()
-        val order = deploy["order"] as? List<*> ?: return deploy.keys.mapNotNull { it?.asString() }.filter { it != "order" }
+        val deploy = (cfg["deploy"] as? Map<*, *>)?.normalizeMap() ?: return emptyList()
+        val order = deploy["order"] as? List<*> ?: return deploy.keys.filter { it !in reservedDeployKeys }
         return order.mapNotNull { it?.asString() }
+    }
+
+    private fun postDeployStageNames(cfg: Map<String, Any?>, envName: String): List<String> {
+        val deploy = (cfg["deploy"] as? Map<*, *>)?.normalizeMap().orEmpty()
+        val env = (deploy[envName] as? Map<*, *>)?.normalizeMap().orEmpty()
+        val postDeployStages = env["postDeployStages"] as? List<*> ?: return emptyList()
+        return postDeployStages.mapIndexedNotNull { index, stage ->
+            val name = (stage as? Map<*, *>)?.normalizeMap()?.get("name")?.asString()
+            name?.takeIf { it.isNotBlank() } ?: "Stage ${index + 1}"
+        }
     }
 
     private fun microfrontendOrder(cfg: Map<String, Any?>): List<String> {

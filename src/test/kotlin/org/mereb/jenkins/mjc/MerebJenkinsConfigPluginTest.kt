@@ -42,6 +42,7 @@ class MerebJenkinsConfigPluginTest {
         assertTrue(body.contains("\"generatedBaseDefaults\""))
         assertTrue(body.contains("\"defaults\""))
         assertTrue(body.contains("\"extends\""))
+        assertTrue(body.contains("\"postDeployStages\""))
         assertTrue(body.contains("\"apiService\""))
         assertTrue(body.contains("\"outboxWorker\""))
     }
@@ -206,6 +207,7 @@ class MerebJenkinsConfigPluginTest {
         assertTrue("service recipe" in labels)
         assertTrue("image block" in labels)
         assertTrue("release autoTag" in labels)
+        assertTrue("post deploy stage" in labels)
         assertTrue("generated outbox deploy env" in labels)
         assertTrue("generated api service deploy env" in labels)
         assertTrue("deploy defaults with inherited outbox env" in labels)
@@ -287,7 +289,41 @@ class MerebJenkinsConfigPluginTest {
 
         assertTrue(suggestions.any { it.lookup == "generatedValues" && it.insertText == "generatedValues:\n  " })
         assertTrue(suggestions.any { it.lookup == "generatedBaseValues" && it.insertText == "generatedBaseValues:\n  " })
+        assertTrue(suggestions.any { it.lookup == "postDeployStages" && it.insertText == "postDeployStages:\n  - " })
         assertTrue(suggestions.any { it.lookup == "valuesFiles" })
+    }
+
+    @Test
+    fun `engine flow includes post deploy stage and excludes deploy defaults pseudo envs`() {
+        val result = MerebJenkinsConfigEngine().analyze(
+            """
+            version: 1
+            recipe: service
+            image:
+              repository: registry.example.com/demo
+            deploy:
+              order: [dev]
+              defaults:
+                chart: app-chart
+              generatedBaseDefaults:
+                profile: apiService
+                inputs:
+                  serviceName: svc-demo
+                  containerPort: 4000
+                  routePrefix: /demo
+              dev:
+                namespace: apps-dev
+                chart: app-chart
+                postDeployStages:
+                  - name: Publish schema
+                    sh: ./scripts/graphos/publish-subgraph.sh
+            """.trimIndent()
+        )
+
+        assertEquals(listOf("dev"), result.summary.deployOrder)
+        assertTrue(result.summary.flowSteps.any { it.label == "Deploy dev" })
+        assertTrue(result.summary.flowSteps.any { it.label == "Post-Deploy dev: Publish schema" })
+        assertFalse(result.summary.flowSteps.any { it.label.contains("defaults", ignoreCase = true) })
     }
 
     @Test

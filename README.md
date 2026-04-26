@@ -12,6 +12,7 @@ This IntelliJ plugin adds editor support for Mereb Jenkins pipeline configuratio
 - Adds a `New Mereb Jenkins Config` action that creates recipe-aware starter configs for `build`, `package`, `image`, `service`, `microfrontend`, and `terraform`.
 - Adds a conservative migration assistant that previews project-local changes before renaming configs or touching the sibling `Jenkinsfile`.
 - Adds context-aware completions for known values such as `recipe`, `delivery.mode`, `release.autoTag.bump`, and environment references inside order lists.
+- Adds deploy-environment completion support for `postDeployStages` so schema publish hooks are discoverable inline.
 - Adds snippet completions for common blocks such as service starters, image blocks, deploy environments, microfrontend environments, and `release.autoTag`.
 - Adds inline documentation for important keys like `recipe`, `delivery.mode`, `release.autoTag.bump`, `deploy.*`, `microfrontend.*`, and `terraform.*`.
 - Adds relation-aware editor coloring for linked order entries, unused environment blocks, inactive sections, and ignored runtime keys.
